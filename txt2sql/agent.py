@@ -23,11 +23,12 @@ Fluxo de nós:
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Annotated, Any
 
 import sqlglot
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from langchain_core.tools import StructuredTool
+from langgraph.channels.untracked_value import UntrackedValue
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import MessagesState
 from langgraph.graph.state import CompiledStateGraph
@@ -56,6 +57,8 @@ class AgentState(MessagesState):
         page_count: Número de queries de dados executadas no turno.
         schema_loaded: Indica se o schema já foi carregado neste fluxo.
         duckdb_session: Sessão DuckDB efêmera do turno (ou ``None``).
+            Não é checkpointada (``UntrackedValue``) — não é msgpack-serializável
+            e é recriada em ``init_turn`` a cada invoke.
         resolved_shards: Cache de shards resolvidos no turno.
         multi_materialized: Metadados de fan-in multi-shard por ``table_id``.
         pending_query: Query validada aguardando roteamento/execução.
@@ -63,7 +66,7 @@ class AgentState(MessagesState):
 
     page_count: int
     schema_loaded: bool
-    duckdb_session: DuckDBSession | None
+    duckdb_session: Annotated[DuckDBSession | None, UntrackedValue]
     resolved_shards: dict[tuple[str, str], ShardResult]
     multi_materialized: dict[str, dict[str, Any]]
     pending_query: dict[str, Any] | None

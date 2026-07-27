@@ -27,7 +27,9 @@ Versão: `txt2sql.__version__`.
 * `config`: `AgentConfig`.
 * `checkpointer`: objeto LangGraph opcional (`MemorySaver`, saver Postgres, etc.). A lib **não** cria checkpointer.
 
-Retorno: grafo com `invoke` / `stream`. Estado estende `MessagesState` com `page_count`, `schema_loaded`, `duckdb_session`, `resolved_shards`, `multi_materialized`, `pending_query`.
+Retorno: grafo com `invoke` / `stream`. Estado estende `MessagesState` com
+`page_count`, `schema_loaded`, `duckdb_session` (efêmera, **não** checkpointada),
+`resolved_shards`, `multi_materialized`, `pending_query`.
 
 ## Tools expostas ao LLM
 
