@@ -45,6 +45,7 @@ from txt2sql.db.shard import ShardResolver
 from txt2sql.guardrail import ReadOnlyViolationError, validate_sql
 from txt2sql.llm import build_llm
 from txt2sql.prompts import Txt2SqlPromptBuilder
+from txt2sql.query_routing import analyze_table_refs, routing_rejection_reason
 
 
 # --------------------------------------------------------------------------- #
@@ -466,6 +467,22 @@ def build_agent(
             logger.warning("check_query: query rejeitada: {}", err)
             msg = ToolMessage(
                 content=f"Query REJEITADA pelo guardrail: {err}. Corrija e tente novamente.",
+                tool_call_id=query_tc["id"],
+            )
+            return {"messages": [msg, *extra], "pending_query": None}
+
+        refs = analyze_table_refs(
+            sql,
+            config,
+            state.get("resolved_shards", {}),
+            multi,
+            default_dialect,
+        )
+        routing_err = routing_rejection_reason(refs)
+        if routing_err is not None:
+            logger.warning("check_query: rejeitada por roteamento: {}", routing_err)
+            msg = ToolMessage(
+                content=f"Query REJEITADA pelo roteador: {routing_err}",
                 tool_call_id=query_tc["id"],
             )
             return {"messages": [msg, *extra], "pending_query": None}

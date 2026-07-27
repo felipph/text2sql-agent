@@ -208,7 +208,11 @@ def write_prompts(dataset: Dataset, path: Path | None = None) -> Path:
                     "com status vencido?"
                 ),
                 "expected": vencido_cliente["razao_social"],
-                "notes": "Cruzar clientes + recebiveis (pode haver mais de um)",
+                "notes": (
+                    "NÃO fazer JOIN cross-database. Passos: achar CNPJs com "
+                    "vencido (via materialize/resolves) e depois buscar razão "
+                    "social em clientes — ou o inverso."
+                ),
             }
         )
 

@@ -161,6 +161,14 @@ class Txt2SqlPromptBuilder:
                 "(`resolve_shard` + query no nome físico) — não chame "
                 "`materialize_sharded_table`."
             ),
+            (
+                "7. NUNCA faça JOIN (nem FROM com várias tabelas) misturando tabela "
+                "não-shardada e tabela shardada na mesma query SQL no OLTP — os "
+                "dados vivem em bancos diferentes. Também é proibido usar o nome "
+                "lógico da shardada sem materialize prévio. Correlacione em "
+                "passos: consulte cada lado separadamente (ou só o lógico no "
+                "DuckDB após materialize) e combine na resposta final."
+            ),
             "",
             "Discriminadores por tabela:",
         ]
@@ -183,8 +191,11 @@ class Txt2SqlPromptBuilder:
                 f"`{r.to_ref.table}.{r.to_ref.column}`{desc}"
             )
         lines.append(
-            "\nUse esses relacionamentos para construir JOINs corretos. Prefira JOINs "
-            "explícitos (`INNER JOIN ... ON ...`)."
+            "\nUse esses relacionamentos como heurística de chave. "
+            "JOINs SQL só são válidos entre tabelas no MESMO banco físico. "
+            "Se uma ponta for shardada e a outra não, NÃO emita um único JOIN — "
+            "consulte em passos separados (ou materialize a shardada no DuckDB e "
+            "não misture com tabelas de outro banco na mesma SQL)."
         )
         return "\n".join(lines)
 
