@@ -3,7 +3,7 @@
 **Data:** 2026-07-27  
 **Escopo:** `DuckDBSession`, `ShardResolver` / novo tool, `agent.py` (estado + roteamento),
 `config` (`max_shard_discriminators`), `prompts.py`, ADR-0002, testes  
-**Status:** aprovado (pending implementation)
+**Status:** implementado
 
 ## Problema
 

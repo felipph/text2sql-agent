@@ -12,8 +12,8 @@ from txt2sql.config import (
     AgentConfig,
     DatabaseConfig,
     DuckDBConfig,
-    ShardResult,
     ShardingConfig,
+    ShardResult,
     TableConfig,
     load_config,
 )
@@ -77,9 +77,7 @@ def _build_registry_and_resolver() -> tuple[DatabaseRegistry, ShardResolver, Age
     eng_b = create_engine("sqlite:///:memory:")
     with eng_a.begin() as c:
         c.execute(text("CREATE TABLE rec_a (cnpj TEXT, valor REAL)"))
-        c.execute(
-            text("INSERT INTO rec_a VALUES ('111', 10.0), ('122', 15.0), ('199', 99.0)")
-        )
+        c.execute(text("INSERT INTO rec_a VALUES ('111', 10.0), ('122', 15.0), ('199', 99.0)"))
     with eng_b.begin() as c:
         c.execute(text("CREATE TABLE rec_b (cnpj TEXT, valor REAL)"))
         c.execute(text("INSERT INTO rec_b VALUES ('222', 20.0), ('333', 30.0)"))
@@ -129,9 +127,9 @@ def test_materialize_sharded_values_groups_and_filters() -> None:
             ("222", 20.0),
         ]
         # 199 está no mesmo físico que 111/122 mas não foi pedido
-        assert session.execute("SELECT COUNT(*) AS c FROM recebiveis WHERE cnpj = '199'")[
-            0
-        ]["c"] == 0
+        assert (
+            session.execute("SELECT COUNT(*) AS c FROM recebiveis WHERE cnpj = '199'")[0]["c"] == 0
+        )
     finally:
         session.close()
 
@@ -191,3 +189,17 @@ def test_materialize_sharded_values_rejects_single() -> None:
             )
     finally:
         session.close()
+
+
+def test_prompt_mentions_materialize_sharded_table() -> None:
+    from txt2sql.prompts import Txt2SqlPromptBuilder
+
+    config = AgentConfig(
+        databases=[
+            DatabaseConfig(id="db_a", connection_string="sqlite:///:memory:"),
+        ],
+        tables=[_sharded_table()],
+    )
+    prompt = Txt2SqlPromptBuilder(config).build()
+    assert "materialize_sharded_table" in prompt
+    assert "nome lógico" in prompt.lower()

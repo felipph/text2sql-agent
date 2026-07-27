@@ -80,6 +80,7 @@ agent:
   max_pages: 10
   max_string_length: 10000
   read_only: true
+  max_shard_discriminators: 20  # teto de CNPJs por fan-in multi-shard
 
 llm:
   # Opcional — se omitido, usa as env vars AZURE_OPENAI_*.
@@ -89,5 +90,6 @@ llm:
 
 custom_section: |
   Você é especialista em análise de crédito e recebíveis.
-  Lembre-se: `recebiveis` é SHARDADA por CNPJ — sempre resolva o shard antes de
-  consultar e NUNCA agregue entre CNPJs diferentes sem o discriminador.
+  Lembre-se: `recebiveis` é SHARDADA por CNPJ — com um CNPJ use `resolve_shard`;
+  com 2+ CNPJs use `materialize_sharded_table` e consulte pelo nome lógico.
+  NUNCA faça fan-out cego sem lista de discriminadores.

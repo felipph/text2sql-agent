@@ -24,10 +24,12 @@ Chosen option: **resolver determinístico + tool `resolve_shard`, fan-out proibi
 **Positive:**
 - Custo e blast radius previsíveis por pergunta
 - Contrato explícito via `ShardResult`
+- Cross-shard com lista conhecida: fan-in via DuckDB (`materialize_sharded_table`);
+  fan-out cego continua proibido
 
 **Negative:**
-- Perguntas cross-shard exigem orquestração fora da lib
-- LLM precisa ser instruído a resolver antes de consultar
+- LLM precisa ser instruído a resolver (single) ou materializar (multi) antes de consultar
+- Análise multi limitada por `max_shard_discriminators` e `fetch_limit` por grupo físico
 
 **Neutral:**
 - Resolver é código do usuário (`modulo:funcao`), não hardcoded

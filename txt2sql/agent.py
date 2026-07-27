@@ -13,6 +13,7 @@ Fluxo de nós:
     generate_query
         ├─[sem tool_calls]───────────────────────────────────────→ END
         ├─[resolve_shard]→ run_resolve_shard ─────────────────────→ generate_query
+        ├─[materialize_sharded_table]→ run_materialize_sharded ───→ generate_query
         ├─[sql_db_schema]→ get_schema ────────────────────────────→ generate_query
         └─[sql_db_query] → check_query → route_execution
                                 ├─[duckdb]→ materialize_duckdb → run_duckdb_query → generate_query
@@ -22,7 +23,7 @@ Fluxo de nós:
 from __future__ import annotations
 
 import json
-from typing import Any, Callable
+from typing import Any
 
 import sqlglot
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
@@ -36,6 +37,7 @@ from sqlalchemy import exc as sa_exc
 
 from txt2sql.config import AgentConfig, ShardResult, TableConfig
 from txt2sql.db.duckdb_layer import DuckDBSession, needs_duckdb
+from txt2sql.db.multi_shard import materialize_sharded_values
 from txt2sql.db.registry import DatabaseRegistry
 from txt2sql.db.schema import SchemaLoader
 from txt2sql.db.shard import ShardResolver
@@ -55,6 +57,7 @@ class AgentState(MessagesState):
         schema_loaded: Indica se o schema já foi carregado neste fluxo.
         duckdb_session: Sessão DuckDB efêmera do turno (ou ``None``).
         resolved_shards: Cache de shards resolvidos no turno.
+        multi_materialized: Metadados de fan-in multi-shard por ``table_id``.
         pending_query: Query validada aguardando roteamento/execução.
     """
 
@@ -62,6 +65,7 @@ class AgentState(MessagesState):
     schema_loaded: bool
     duckdb_session: DuckDBSession | None
     resolved_shards: dict[tuple[str, str], ShardResult]
+    multi_materialized: dict[str, dict[str, Any]]
     pending_query: dict[str, Any] | None
 
 
@@ -80,6 +84,17 @@ class SqlQueryInput(BaseModel):
     """Argumentos do tool ``sql_db_query``."""
 
     query: str = Field(description="Uma única query SELECT a ser executada.")
+
+
+class MaterializeShardedInput(BaseModel):
+    """Argumentos do tool ``materialize_sharded_table``."""
+
+    table_id: str = Field(description="ID lógico da tabela shardada (ex.: 'recebiveis').")
+    discriminator_values: list[str] = Field(
+        description=(
+            "Lista com 2 ou mais valores do discriminador (ex.: CNPJs). Não use com 0 ou 1 valor."
+        )
+    )
 
 
 def _noop(*args: Any, **kwargs: Any) -> str:  # pragma: no cover - nunca chamado
@@ -101,16 +116,12 @@ def _rows_to_text(rows: list[dict[str, Any]], max_len: int, top_k: int) -> str:
     if not rows:
         return "[]  (nenhuma linha retornada)"
     limited = rows[:top_k]
-    out = [
-        {k: _truncate(v, max_len) for k, v in row.items()} for row in limited
-    ]
+    out = [{k: _truncate(v, max_len) for k, v in row.items()} for row in limited]
     suffix = "" if len(rows) <= top_k else f"\n... (+{len(rows) - top_k} linha(s) omitida(s))"
     return json.dumps(out, ensure_ascii=False, default=str) + suffix
 
 
-def _answer_unhandled_tool_calls(
-    message: AIMessage, handled_ids: set[str]
-) -> list[ToolMessage]:
+def _answer_unhandled_tool_calls(message: AIMessage, handled_ids: set[str]) -> list[ToolMessage]:
     """Gera ToolMessages de erro para tool_calls não tratadas.
 
     Garante que todo ``tool_call`` do modelo receba uma resposta (requisito da
@@ -186,6 +197,22 @@ def build_agent(
     if shard_resolver is not None:
         tools.append(shard_resolver.build_tool(cache=None))
 
+    multi_shard_tables = [t for t in config.sharded_tables if t.uses_duckdb]
+    if multi_shard_tables and shard_resolver is not None:
+        tools.append(
+            StructuredTool.from_function(
+                func=_noop,
+                name="materialize_sharded_table",
+                description=(
+                    "Materializa 2+ discriminadores de uma tabela shardada numa "
+                    "única tabela DuckDB (nome lógico). Use quando a análise "
+                    "cruzar vários valores do discriminador. Depois consulte com "
+                    "sql_db_query usando o nome lógico. NÃO use com 0 ou 1 valor."
+                ),
+                args_schema=MaterializeShardedInput,
+            )
+        )
+
     llm_with_tools = llm.bind_tools(tools)
 
     default_dialect = config.dialect
@@ -195,6 +222,7 @@ def build_agent(
     # ------------------------------------------------------------------ #
     def _build_physical_index(
         resolved_shards: dict[tuple[str, str], ShardResult],
+        multi_materialized: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, tuple[TableConfig, str]]:
         """Mapa {nome_físico_lower: (TableConfig, database_id)}."""
         index: dict[str, tuple[TableConfig, str]] = {}
@@ -206,17 +234,23 @@ def build_agent(
         for (table_id, _value), shard in resolved_shards.items():
             table = config.get_table(table_id)
             index[shard.table_name.lower()] = (table, shard.database_id)
+        for table_id in multi_materialized or {}:
+            table = config.get_table(table_id)
+            index[table_id.lower()] = (table, table.database)
+            index[table.name.lower()] = (table, table.database)
         return index
 
     def _resolve_target(
-        sql: str, resolved_shards: dict[tuple[str, str], ShardResult]
+        sql: str,
+        resolved_shards: dict[tuple[str, str], ShardResult],
+        multi_materialized: dict[str, dict[str, Any]] | None = None,
     ) -> tuple[str, TableConfig | None, str | None]:
         """Determina (database_id, table_config, physical_name) alvo de uma query.
 
         Retorna o banco da primeira tabela reconhecida. ``table_config`` e
         ``physical_name`` referem-se a uma tabela que use DuckDB, se houver.
         """
-        index = _build_physical_index(resolved_shards)
+        index = _build_physical_index(resolved_shards, multi_materialized)
         try:
             parsed = sqlglot.parse_one(sql, dialect=default_dialect)
         except Exception:  # noqa: BLE001
@@ -232,6 +266,7 @@ def build_agent(
         database_id: str | None = None
         duck_table: TableConfig | None = None
         duck_physical: str | None = None
+        multi = multi_materialized or {}
         for name in referenced:
             if name in index:
                 table, db_id = index[name]
@@ -239,7 +274,11 @@ def build_agent(
                     database_id = db_id
                 if table.uses_duckdb and duck_table is None:
                     duck_table = table
-                    duck_physical = name
+                    # nome lógico pós fan-in: sem reescrita físico→lógico
+                    if table.id in multi or table.id.lower() == name:
+                        duck_physical = None
+                    else:
+                        duck_physical = name
         if database_id is None:
             # fallback: primeiro banco declarado
             database_id = config.databases[0].id if config.databases else ""
@@ -261,6 +300,7 @@ def build_agent(
             "schema_loaded": False,
             "duckdb_session": session,
             "resolved_shards": {},
+            "multi_materialized": {},
             "pending_query": None,
         }
 
@@ -270,9 +310,7 @@ def build_agent(
         table_ids = schema_loader.get_all_table_names()
         schema_text = schema_loader.get_schema_for(table_ids, include_samples=True)
         msg = SystemMessage(
-            content=(
-                "Tabelas disponíveis (use os IDs lógicos abaixo):\n\n" + schema_text
-            )
+            content=("Tabelas disponíveis (use os IDs lógicos abaixo):\n\n" + schema_text)
         )
         return {"messages": [msg], "schema_loaded": True}
 
@@ -313,6 +351,59 @@ def build_agent(
         tool_messages.extend(_answer_unhandled_tool_calls(ai, handled))
         return {"messages": tool_messages, "resolved_shards": resolved}
 
+    def run_materialize_sharded(state: AgentState) -> dict[str, Any]:
+        """Executa ``materialize_sharded_table`` (fan-in multi-shard no DuckDB)."""
+        ai = _last_ai_message(state)
+        multi = dict(state.get("multi_materialized") or {})
+        resolved = dict(state.get("resolved_shards") or {})
+        session = state.get("duckdb_session")
+        if session is None:
+            session = DuckDBSession()
+        tool_messages: list[ToolMessage] = []
+        handled: set[str] = set()
+
+        for tc in ai.tool_calls:
+            if tc["name"] != "materialize_sharded_table":
+                continue
+            handled.add(tc["id"])
+            args = tc["args"]
+            table_id = args.get("table_id", "")
+            values = args.get("discriminator_values") or []
+            try:
+                if shard_resolver is None:
+                    raise ValueError("Nenhuma tabela shardada configurada.")
+                table = config.get_table(table_id)
+                result = materialize_sharded_values(
+                    table=table,
+                    values=list(values),
+                    max_discriminators=config.max_shard_discriminators,
+                    resolver=shard_resolver,
+                    registry=registry,
+                    session=session,
+                )
+                for v in result.materialized_values:
+                    shard = shard_resolver.resolve(table_id, v)
+                    resolved[(table_id, v)] = shard
+                multi[table_id] = {
+                    "values": result.materialized_values,
+                    "truncated": result.truncated,
+                    "omitted_count": result.omitted_count,
+                    "message": result.message,
+                }
+                content = json.dumps(result.to_dict(), ensure_ascii=False)
+            except Exception as err:  # noqa: BLE001
+                logger.warning("materialize_sharded_table falhou: {}", err)
+                content = f"ERRO ao materializar shards: {err}"
+            tool_messages.append(ToolMessage(content=content, tool_call_id=tc["id"]))
+
+        tool_messages.extend(_answer_unhandled_tool_calls(ai, handled))
+        return {
+            "messages": tool_messages,
+            "multi_materialized": multi,
+            "resolved_shards": resolved,
+            "duckdb_session": session,
+        }
+
     def get_schema(state: AgentState) -> dict[str, Any]:
         """Executa as tool calls ``sql_db_schema`` e devolve o schema pedido."""
         ai = _last_ai_message(state)
@@ -343,9 +434,7 @@ def build_agent(
         query_tc = next((tc for tc in ai.tool_calls if tc["name"] == "sql_db_query"), None)
 
         # responde qualquer tool call não-query com erro (mantém protocolo)
-        extra = _answer_unhandled_tool_calls(
-            ai, {query_tc["id"]} if query_tc else set()
-        )
+        extra = _answer_unhandled_tool_calls(ai, {query_tc["id"]} if query_tc else set())
         if query_tc is None:
             return {"messages": extra, "pending_query": None}
 
@@ -364,6 +453,10 @@ def build_agent(
         allowed = [t.name for t in config.tables] + [
             s.table_name for s in state.get("resolved_shards", {}).values()
         ]
+        multi = state.get("multi_materialized") or {}
+        for tid in multi:
+            allowed.append(tid)
+            allowed.append(config.get_table(tid).name)
         try:
             validate_sql(sql, dialect=default_dialect, allowed_tables=allowed)
         except ReadOnlyViolationError as err:
@@ -375,9 +468,14 @@ def build_agent(
             return {"messages": [msg, *extra], "pending_query": None}
 
         database_id, duck_table, duck_physical = _resolve_target(
-            sql, state.get("resolved_shards", {})
+            sql, state.get("resolved_shards", {}), multi
         )
-        use_duckdb = duck_table is not None and needs_duckdb(duck_table, sql)
+        use_duckdb = False
+        if duck_table is not None:
+            if duck_table.id in multi:
+                use_duckdb = True
+            else:
+                use_duckdb = needs_duckdb(duck_table, sql)
         pending = {
             "sql": sql,
             "tool_call_id": query_tc["id"],
@@ -386,9 +484,7 @@ def build_agent(
             "duck_table_id": duck_table.id if duck_table else None,
             "duck_physical": duck_physical,
         }
-        logger.info(
-            "check_query: query aprovada (db={}, duckdb={})", database_id, use_duckdb
-        )
+        logger.info("check_query: query aprovada (db={}, duckdb={})", database_id, use_duckdb)
         return {"messages": extra, "pending_query": pending}
 
     def run_query(state: AgentState) -> dict[str, Any]:
@@ -421,6 +517,10 @@ def build_agent(
             session = DuckDBSession()
 
         table = config.get_table(pending["duck_table_id"])
+        if session.is_materialized(table.id):
+            logger.info("materialize_duckdb: {!r} já materializada; pulando", table.id)
+            return {"duckdb_session": session}
+
         source_engine = registry.get_engine(pending["database_id"])
         physical = pending.get("duck_physical")
         try:
@@ -446,13 +546,14 @@ def build_agent(
         table = config.get_table(pending["duck_table_id"])
         physical = pending.get("duck_physical")
 
-        rewritten = _rewrite_for_duckdb(
-            pending["sql"], physical, table.id, default_dialect
-        )
+        rewritten = _rewrite_for_duckdb(pending["sql"], physical, table.id, default_dialect)
         logger.info("run_duckdb_query: executando query analítica no DuckDB")
         try:
             rows = session.execute(rewritten)
             content = _rows_to_text(rows, config.max_string_length, config.top_k)
+            meta = (state.get("multi_materialized") or {}).get(table.id)
+            if meta and meta.get("truncated"):
+                content = f"{content}\n\nAVISO: {meta.get('message', '')}"
         except Exception as err:  # noqa: BLE001
             logger.warning("run_duckdb_query: erro: {}", err)
             content = f"ERRO ao executar a análise: {err}"
@@ -474,6 +575,8 @@ def build_agent(
         if not ai.tool_calls:
             return END
         names = {tc["name"] for tc in ai.tool_calls}
+        if "materialize_sharded_table" in names:
+            return "run_materialize_sharded"
         if "resolve_shard" in names:
             return "run_resolve_shard"
         if "sql_db_schema" in names:
@@ -498,6 +601,7 @@ def build_agent(
     graph.add_node("load_schema", load_schema)
     graph.add_node("generate_query", generate_query)
     graph.add_node("run_resolve_shard", run_resolve_shard)
+    graph.add_node("run_materialize_sharded", run_materialize_sharded)
     graph.add_node("get_schema", get_schema)
     graph.add_node("check_query", check_query)
     graph.add_node("materialize_duckdb", materialize_duckdb)
@@ -505,16 +609,21 @@ def build_agent(
     graph.add_node("run_query", run_query)
 
     graph.add_edge(START, "init_turn")
-    graph.add_conditional_edges(
-        "init_turn", route_discovery, ["load_schema", "generate_query"]
-    )
+    graph.add_conditional_edges("init_turn", route_discovery, ["load_schema", "generate_query"])
     graph.add_edge("load_schema", "generate_query")
     graph.add_conditional_edges(
         "generate_query",
         route_after_generate,
-        ["run_resolve_shard", "get_schema", "check_query", END],
+        [
+            "run_resolve_shard",
+            "run_materialize_sharded",
+            "get_schema",
+            "check_query",
+            END,
+        ],
     )
     graph.add_edge("run_resolve_shard", "generate_query")
+    graph.add_edge("run_materialize_sharded", "generate_query")
     graph.add_edge("get_schema", "generate_query")
     graph.add_conditional_edges(
         "check_query",
@@ -562,4 +671,4 @@ def _rewrite_for_duckdb(
     return tree.sql(dialect="duckdb")
 
 
-__all__ = ["build_agent", "AgentState"]
+__all__ = ["AgentState", "build_agent"]

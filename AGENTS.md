@@ -42,7 +42,7 @@ docs/superpowers/  # Specs e plans de features (não é doc de produto)
 ## Gotchas
 
 - Checkpointer **não** é criado pela lib — passe via `build_agent(..., checkpointer=...)`.
-- Tabelas shardadas exigem `resolve_shard` antes de `sql_db_query`; fan-out é proibido.
+- Tabelas shardadas: single → `resolve_shard` antes de `sql_db_query`; multi (2+) → `materialize_sharded_table` e query no nome lógico. Fan-out cego é proibido.
 - Sem `columns` no YAML → discovery no `database` de referência; com `columns` → declarativo.
 - Env vars de banco vêm de `connection_env` no YAML (ex.: `MAIN_DB_URL`), não de nomes fixos.
 - `AZURE_OPENAI_*` são obrigatórias se o bloco `llm` do YAML estiver incompleto.

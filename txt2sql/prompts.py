@@ -69,7 +69,7 @@ class Txt2SqlPromptBuilder:
         elif dialect in ("postgres", "postgresql"):
             lines.append(
                 "- Use `LIMIT N` para limitar linhas.\n"
-                "- Delimite identificadores com aspas duplas `\" \"` quando necessário.\n"
+                '- Delimite identificadores com aspas duplas `" "` quando necessário.\n'
                 "- Use `NOW()`/`CURRENT_DATE` para data/hora atual."
             )
         else:
@@ -117,26 +117,55 @@ class Txt2SqlPromptBuilder:
         names = ", ".join(f"`{t.id}`" for t in sharded)
         lines = [
             "## 5. Multi-banco e Sharding (CRÍTICO)",
-            f"As seguintes tabelas são SHARDADAS (particionadas fisicamente em vários "
-            f"bancos): {names}.",
+            (
+                f"As seguintes tabelas são SHARDADAS (particionadas fisicamente em vários "
+                f"bancos): {names}."
+            ),
             "",
             "Protocolo OBRIGATÓRIO para tabelas shardadas:",
-            "1. Antes de consultar uma tabela shardada, você DEVE chamar a ferramenta "
-            "`resolve_shard(table_id, discriminator_value)` passando o valor do "
-            "discriminador extraído da pergunta do usuário.",
-            "2. A ferramenta retorna `{database_id, table_name}` — use o `table_name` "
-            "retornado (nome físico real) na sua query.",
+            (
+                "1. Antes de consultar uma tabela shardada, você DEVE chamar a ferramenta "
+                "`resolve_shard(table_id, discriminator_value)` passando o valor do "
+                "discriminador extraído da pergunta do usuário."
+            ),
+            (
+                "2. A ferramenta retorna `{database_id, table_name}` — use o `table_name` "
+                "retornado (nome físico real) na sua query."
+            ),
             "3. NUNCA assuma ou invente o shard/nome físico da tabela.",
-            "4. É TERMINANTEMENTE PROIBIDO fazer fan-out (consultar todos os shards e "
-            "agregar). Se o usuário NÃO forneceu o valor do discriminador, você DEVE "
-            "PARAR e PEDIR o valor ao usuário antes de continuar.",
+            (
+                "4. É TERMINANTEMENTE PROIBIDO fazer fan-out cego (consultar todos os "
+                "shards sem lista de discriminadores). Se o usuário NÃO forneceu nem "
+                "permitiu descobrir o valor do discriminador, você DEVE PARAR e PEDIR "
+                "antes de continuar."
+            ),
+            (
+                "5. Se a pergunta envolve 2 ou mais valores do discriminador (explícitos "
+                "na pergunta ou descobertos via query em tabela NÃO shardada):"
+            ),
+            "   a. Obtenha a lista completa de valores.",
+            (
+                "   b. Chame `materialize_sharded_table(table_id, discriminator_values)` "
+                "UMA vez (nunca com 0 ou 1 valor)."
+            ),
+            (
+                "   c. Em seguida consulte com `sql_db_query` usando o NOME LÓGICO da "
+                "tabela (ex.: `recebiveis`), NÃO os nomes físicos."
+            ),
+            (
+                "   d. Se o retorno indicar `truncated=true`, avise o usuário na resposta "
+                "final (análise parcial pelo limite configurado)."
+            ),
+            (
+                "6. Com exatamente 1 discriminador, use o protocolo single "
+                "(`resolve_shard` + query no nome físico) — não chame "
+                "`materialize_sharded_table`."
+            ),
             "",
             "Discriminadores por tabela:",
         ]
         for t in sharded:
-            lines.append(
-                f"- `{t.id}`: discriminador = `{t.sharding.discriminator_column}`"
-            )
+            lines.append(f"- `{t.id}`: discriminador = `{t.sharding.discriminator_column}`")
         return "\n".join(lines)
 
     # ------------------------------------------------------------------ #
@@ -169,9 +198,7 @@ class Txt2SqlPromptBuilder:
         lines = ["## 7. Glossário de negócio"]
         for g in glossary:
             lines.append(f"- **{g.term}**: {g.definition}")
-        lines.append(
-            "\nUse o glossário para interpretar termos de negócio na pergunta do usuário."
-        )
+        lines.append("\nUse o glossário para interpretar termos de negócio na pergunta do usuário.")
         return "\n".join(lines)
 
     # ------------------------------------------------------------------ #

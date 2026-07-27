@@ -16,10 +16,12 @@ flowchart TB
   Graph --> IT[init_turn]
   IT --> GQ[generate_query]
   GQ -->|resolve_shard| SR[ShardResolver]
+  GQ -->|materialize_sharded_table| MS[multi_shard fan-in]
   GQ -->|sql_db_schema| SL[SchemaLoader]
   GQ -->|sql_db_query| GR[guardrail.validate_sql]
   GR -->|direto| REG[DatabaseRegistry / engines]
   GR -->|duckdb| DD[DuckDBSession.materialize]
+  MS --> DD
   DD --> REG
 
   LLM[Azure OpenAI] --> GQ
@@ -38,7 +40,9 @@ flowchart TB
 
 **`ShardResolver` (`db/shard.py`)** — tool `resolve_shard`; importa o callable dotted e cacheia resultados no estado do turno.
 
-**`DuckDBSession` (`db/duckdb_layer.py`)** — materializa lotes da origem em DuckDB in-memory e reexecuta a query analítica.
+**`materialize_sharded_values` (`db/multi_shard.py`)** — fan-in: resolve N discriminadores, agrupa por físico, materializa no DuckDB com `WHERE disc IN (...)`.
+
+**`DuckDBSession` (`db/duckdb_layer.py`)** — materializa lotes da origem em DuckDB in-memory (create / append / replace) e reexecuta a query analítica.
 
 **`validate_sql` (`guardrail.py`)** — AST sqlglot fail-closed; denylist textual complementar.
 
@@ -49,9 +53,9 @@ flowchart TB
 1. Caller invoca o grafo com `HumanMessage` e `thread_id`.
 2. `init_turn` cria sessão DuckDB efêmera e zera contadores do turno.
 3. Se necessário, `load_schema` alimenta o contexto; o LLM gera tool calls.
-4. Tabelas shardadas passam por `resolve_shard` antes de qualquer SELECT.
+4. Tabelas shardadas: single → `resolve_shard`; multi (2+) → `materialize_sharded_table` antes do SELECT analítico.
 5. `sql_db_query` → `check_query` (guardrail) → rota direta ou DuckDB.
-6. No caminho DuckDB: `SELECT *` limitado da origem em lotes → tabela lógica no DuckDB → query analítica.
+6. No caminho DuckDB: materializa da origem (ou reusa fan-in já feito) → query analítica.
 7. Resultado truncado (`top_k` / `max_string_length`) volta ao LLM até a resposta final; sessão DuckDB é descartada.
 
 ## Dependências externas
