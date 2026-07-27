@@ -1,0 +1,93 @@
+# Exemplo completo: Recebíveis com multi-banco + sharding + camada DuckDB.
+#
+# Cenário: a tabela `recebiveis` é fisicamente particionada por CNPJ em vários
+# bancos (shards). Um resolver determinístico calcula, a partir do CNPJ, o banco
+# físico e o nome real da tabela (com sufixo 000~999). A tabela é volumétrica,
+# então análises (agregações) são roteadas por uma camada DuckDB intermediária.
+
+dialect: postgres
+
+databases:
+  - id: db_main
+    connection_env: MAIN_DB_URL          # cadastro/clientes (não shardado)
+    read_only: true
+    connect_timeout: 10
+
+  - id: db_shard_1
+    connection_env: SHARD_1_DB_URL
+    read_only: true
+
+  - id: db_shard_2
+    connection_env: SHARD_2_DB_URL
+    read_only: true
+
+  - id: db_shard_3
+    connection_env: SHARD_3_DB_URL
+    read_only: true
+
+tables:
+  # Tabela de cadastro — não shardada, discovery automático de schema.
+  - id: clientes
+    database: db_main
+    schema: public
+    name: clientes
+    description: >-
+      Cadastro de clientes (pessoas jurídicas) com CNPJ e dados cadastrais.
+      Não é shardada; vive no banco principal.
+
+  # Tabela volumétrica e shardada — schema declarativo + DuckDB.
+  - id: recebiveis
+    database: db_main            # banco de referência (discovery/fallback)
+    schema: public
+    name: recebiveis             # nome lógico
+    description: >-
+      Títulos de crédito a receber. Particionada fisicamente por CNPJ em shards;
+      volumétrica — agregações podem passar pela camada DuckDB.
+    sharding:
+      discriminator_column: cnpj
+      resolver: "examples.shard_resolver_example:resolve_cnpj_shard"
+    columns:
+      - name: cnpj
+        type: VARCHAR
+        description: "CNPJ do titular do recebível (14 dígitos, sem formatação)."
+      - name: valor
+        type: NUMERIC
+        description: "Valor bruto do recebível em BRL."
+      - name: data_vencimento
+        type: DATE
+        description: "Data de vencimento do recebível (YYYY-MM-DD)."
+      - name: status
+        type: VARCHAR
+        description: "Status do recebível: 'pendente', 'pago' ou 'vencido'."
+    duckdb:
+      enabled: true
+      trigger: aggregation       # materializa ao detectar GROUP BY / funções de agregação
+      fetch_limit: 100000        # máx. de linhas trazidas do shard de origem
+
+relationships:
+  - from: { table: recebiveis, column: cnpj }
+    to:   { table: clientes, column: cnpj }
+    description: "O recebível pertence ao cliente identificado pelo CNPJ."
+
+glossary:
+  - term: recebível
+    definition: "Título de crédito a receber de um cliente."
+  - term: CNPJ
+    definition: "Cadastro Nacional da Pessoa Jurídica — 14 dígitos."
+
+agent:
+  top_k: 50
+  max_pages: 10
+  max_string_length: 10000
+  read_only: true
+
+llm:
+  # Opcional — se omitido, usa as env vars AZURE_OPENAI_*.
+  deployment: gpt-4o
+  api_version: "2024-06-01"
+  temperature: 0.0
+
+custom_section: |
+  Você é especialista em análise de crédito e recebíveis.
+  Lembre-se: `recebiveis` é SHARDADA por CNPJ — sempre resolva o shard antes de
+  consultar e NUNCA agregue entre CNPJs diferentes sem o discriminador.

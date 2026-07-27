@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "txt2sql"
+version = "0.1.0"
+description = "Biblioteca standalone e customizável para agentes Text-to-SQL com LangGraph, multi-banco, sharding determinístico, schema declarativo e camada DuckDB intermediária por turno."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "txt2sql" }]
+keywords = ["text-to-sql", "langgraph", "langchain", "sql", "sharding", "duckdb"]
+
+dependencies = [
+    "langgraph>=0.2.0",
+    "langchain>=0.3.0",
+    "langchain-community>=0.3.0",
+    "langchain-openai>=0.2.0",
+    "sqlalchemy>=2.0.0",
+    "sqlglot>=25.0.0",
+    "duckdb>=1.0.0",
+    "pyyaml>=6.0",
+    "loguru>=0.7.0",
+]
+
+[project.optional-dependencies]
+langfuse = ["langfuse>=2.0.0"]
+dev = [
+    "pytest>=8.0.0",
+    "ruff>=0.6.0",
+]
+
+[project.urls]
+Homepage = "https://example.com/txt2sql"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["txt2sql*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"

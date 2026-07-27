@@ -1,0 +1,82 @@
+# Exemplo: Diário Oficial — MSSQL (migração do formato antigo do agente `acai`)
+#
+# Migração das principais diferenças em relação ao formato antigo:
+#   * `database.schemas[].tables` (nome simples)  ->  lista `tables` com IDs
+#     lógicos, referência a um `databases[].id` e `schema` explícito.
+#   * A conexão MSSQL, antes montada de MSSQL_* env vars, agora é declarada como
+#     um `databases[]` com `connection_env`.
+#   * `agent.*` (top_k, sample_rows, max_pages, max_string_length, read_only)
+#     mapeado 1:1 para o bloco `agent`.
+#   * `relationships` mantidos (agora referenciando os IDs lógicos das tabelas).
+#
+# Observação sobre `column_parsers`: no formato antigo, a coluna Texto passava
+# por `html_to_markdown`. Parsers de coluna não fazem parte do núcleo do grafo
+# desta lib; a orientação semântica equivalente é fornecida via `description`
+# declarativa da coluna (o pós-processamento de conteúdo é responsabilidade da
+# aplicação consumidora).
+
+dialect: tsql
+
+databases:
+  - id: mssql_ioepa
+    connection_env: MSSQL_URL          # ex.: mssql+pyodbc://user:pass@host/ioepa?driver=ODBC+Driver+18+for+SQL+Server
+    read_only: true
+    connect_timeout: 10
+
+tables:
+  - id: OrgaoPublicacaoDiario
+    database: mssql_ioepa
+    schema: ioepa
+    name: OrgaoPublicacaoDiario
+    description: "Órgãos responsáveis por publicações no Diário Oficial."
+    # sem `columns` => discovery automático via SQLAlchemy inspect()
+
+  - id: TipoPublicacaoDiario
+    database: mssql_ioepa
+    schema: ioepa
+    name: TipoPublicacaoDiario
+    description: "Tipos/categorias de publicação no Diário Oficial."
+
+  - id: Publicacao
+    database: mssql_ioepa
+    schema: ioepa
+    name: Publicacao
+    description: >-
+      Publicações do Diário Oficial, com texto (HTML) e vínculos a tipo e órgão.
+    columns:
+      # Declaração parcial para dar contexto negocial à coluna Texto (antes
+      # tratada por html_to_markdown). As demais colunas ainda podem ser
+      # consultadas; declarar colunas torna esta tabela declarativa.
+      - name: IDPublicacao
+        type: INT
+        description: "Identificador único da publicação."
+      - name: IDTipoPublicacao
+        type: INT
+        description: "FK para TipoPublicacaoDiario — tipo da publicação."
+      - name: IDOrgaoPublicacaoDiario
+        type: INT
+        description: "FK para OrgaoPublicacaoDiario — órgão responsável."
+      - name: Texto
+        type: NVARCHAR
+        description: >-
+          Corpo da publicação em HTML. Pode ser volumoso; ao exibir ao usuário,
+          o conteúdo é tratado como markdown pela aplicação consumidora.
+
+relationships:
+  - from: { table: Publicacao, column: IDTipoPublicacao }
+    to:   { table: TipoPublicacaoDiario, column: IDTipoPublicacaoDiario }
+    description: "Tipo da publicação"
+  - from: { table: Publicacao, column: IDOrgaoPublicacaoDiario }
+    to:   { table: OrgaoPublicacaoDiario, column: IDOrgaoPublicacaoDiario }
+    description: "Órgão responsável pela publicação"
+
+agent:
+  top_k: 20
+  sample_rows_in_table_info: 3
+  max_pages: 20
+  max_string_length: 5000
+  read_only: true
+
+custom_section: |
+  Você é especialista em consultas ao Diário Oficial (schema ioepa).
+  Ao filtrar publicações, prefira restringir por tipo e órgão quando possível.
