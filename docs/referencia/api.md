@@ -29,7 +29,8 @@ Versão: `txt2sql.__version__`.
 
 Retorno: grafo com `invoke` / `stream`. Estado estende `MessagesState` com
 `page_count`, `schema_loaded`, `duckdb_session` (efêmera, **não** checkpointada),
-`resolved_shards`, `multi_materialized`, `pending_query`.
+`resolved_shards`, `multi_materialized`, `pending_queries` (fila de queries
+validadas; várias `sql_db_query` no mesmo passo executam em sequência).
 
 ## Tools expostas ao LLM
 

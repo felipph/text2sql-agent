@@ -192,6 +192,10 @@ class Txt2SqlPromptBuilder:
                 "parcial irrelevante: corrija seguindo A–D e responda com a evidência "
                 "completa."
             ),
+            (
+                "F. Você pode emitir várias `sql_db_query` no mesmo passo (ex.: filtrar "
+                "recebíveis e buscar razão social); elas rodam em sequência."
+            ),
             "",
             "Discriminadores por tabela:",
         ]

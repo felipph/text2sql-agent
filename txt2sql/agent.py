@@ -15,9 +15,8 @@ Fluxo de nós:
         ├─[resolve_shard]→ run_resolve_shard ─────────────────────→ generate_query
         ├─[materialize_sharded_table]→ run_materialize_sharded ───→ generate_query
         ├─[sql_db_schema]→ get_schema ────────────────────────────→ generate_query
-        └─[sql_db_query] → check_query → route_execution
-                                ├─[duckdb]→ materialize_duckdb → run_duckdb_query → generate_query
-                                └─[direto]───────────────────→ run_query ─────────→ generate_query
+        └─[sql_db_query] → check_query → execute_queries → generate_query
+              (várias sql_db_query no mesmo passo: fila sequencial)
 """
 
 from __future__ import annotations
@@ -62,7 +61,7 @@ class AgentState(MessagesState):
             e é recriada em ``init_turn`` a cada invoke.
         resolved_shards: Cache de shards resolvidos no turno.
         multi_materialized: Metadados de fan-in multi-shard por ``table_id``.
-        pending_query: Query validada aguardando roteamento/execução.
+        pending_queries: Fila de queries validadas aguardando execução sequencial.
     """
 
     page_count: int
@@ -70,7 +69,7 @@ class AgentState(MessagesState):
     duckdb_session: Annotated[DuckDBSession | None, UntrackedValue]
     resolved_shards: dict[tuple[str, str], ShardResult]
     multi_materialized: dict[str, dict[str, Any]]
-    pending_query: dict[str, Any] | None
+    pending_queries: list[dict[str, Any]]
 
 
 # --------------------------------------------------------------------------- #
@@ -191,8 +190,10 @@ def build_agent(
         func=_noop,
         name="sql_db_query",
         description=(
-            "Executa uma única query SELECT e retorna as linhas. A query é "
-            "roteada internamente para o banco correto ou para a camada analítica."
+            "Executa uma query SELECT e retorna as linhas. A query é roteada "
+            "internamente para o banco correto ou para a camada analítica. "
+            "Você pode emitir várias chamadas sql_db_query no mesmo passo; "
+            "elas serão executadas em sequência."
         ),
         args_schema=SqlQueryInput,
     )
@@ -305,7 +306,7 @@ def build_agent(
             "duckdb_session": session,
             "resolved_shards": {},
             "multi_materialized": {},
-            "pending_query": None,
+            "pending_queries": [],
         }
 
     def load_schema(state: AgentState) -> dict[str, Any]:
@@ -433,155 +434,174 @@ def build_agent(
         return {"messages": tool_messages}
 
     def check_query(state: AgentState) -> dict[str, Any]:
-        """Valida a query do tool ``sql_db_query`` (guardrail fail-closed)."""
+        """Valida todas as tool calls ``sql_db_query`` (guardrail + roteamento).
+
+        Rejeições viram ToolMessage imediato; aprovadas entram em
+        ``pending_queries`` para execução sequencial em ``execute_queries``.
+        """
         ai = _last_ai_message(state)
-        query_tc = next((tc for tc in ai.tool_calls if tc["name"] == "sql_db_query"), None)
+        query_tcs = [tc for tc in ai.tool_calls if tc["name"] == "sql_db_query"]
+        handled = {tc["id"] for tc in query_tcs}
+        extra = _answer_unhandled_tool_calls(ai, handled)
+        if not query_tcs:
+            return {"messages": extra, "pending_queries": []}
 
-        # responde qualquer tool call não-query com erro (mantém protocolo)
-        extra = _answer_unhandled_tool_calls(ai, {query_tc["id"]} if query_tc else set())
-        if query_tc is None:
-            return {"messages": extra, "pending_query": None}
-
-        sql = query_tc["args"].get("query", "")
         page_count = state.get("page_count", 0)
-        if page_count >= config.max_pages:
-            msg = ToolMessage(
-                content=(
-                    f"Limite de {config.max_pages} consultas por turno atingido. "
-                    "Responda ao usuário com os dados já obtidos."
-                ),
-                tool_call_id=query_tc["id"],
-            )
-            return {"messages": [msg, *extra], "pending_query": None}
-
+        multi = state.get("multi_materialized") or {}
         allowed = [t.name for t in config.tables] + [
             s.table_name for s in state.get("resolved_shards", {}).values()
         ]
-        multi = state.get("multi_materialized") or {}
         for tid in multi:
             allowed.append(tid)
             allowed.append(config.get_table(tid).name)
-        try:
-            validate_sql(sql, dialect=default_dialect, allowed_tables=allowed)
-        except ReadOnlyViolationError as err:
-            logger.warning("check_query: query rejeitada: {}", err)
-            msg = ToolMessage(
-                content=f"Query REJEITADA pelo guardrail: {err}. Corrija e tente novamente.",
-                tool_call_id=query_tc["id"],
+
+        messages: list[ToolMessage] = list(extra)
+        pending: list[dict[str, Any]] = []
+        slots_used = 0
+
+        for query_tc in query_tcs:
+            sql = query_tc["args"].get("query", "")
+            if page_count + slots_used >= config.max_pages:
+                messages.append(
+                    ToolMessage(
+                        content=(
+                            f"Limite de {config.max_pages} consultas por turno atingido. "
+                            "Responda ao usuário com os dados já obtidos."
+                        ),
+                        tool_call_id=query_tc["id"],
+                    )
+                )
+                continue
+
+            try:
+                validate_sql(sql, dialect=default_dialect, allowed_tables=allowed)
+            except ReadOnlyViolationError as err:
+                logger.warning("check_query: query rejeitada: {}", err)
+                messages.append(
+                    ToolMessage(
+                        content=(
+                            f"Query REJEITADA pelo guardrail: {err}. "
+                            "Corrija e tente novamente."
+                        ),
+                        tool_call_id=query_tc["id"],
+                    )
+                )
+                continue
+
+            refs = analyze_table_refs(
+                sql,
+                config,
+                state.get("resolved_shards", {}),
+                multi,
+                default_dialect,
             )
-            return {"messages": [msg, *extra], "pending_query": None}
+            routing_err = routing_rejection_reason(refs)
+            if routing_err is not None:
+                logger.warning("check_query: rejeitada por roteamento: {}", routing_err)
+                messages.append(
+                    ToolMessage(
+                        content=f"Query REJEITADA pelo roteador: {routing_err}",
+                        tool_call_id=query_tc["id"],
+                    )
+                )
+                continue
 
-        refs = analyze_table_refs(
-            sql,
-            config,
-            state.get("resolved_shards", {}),
-            multi,
-            default_dialect,
-        )
-        routing_err = routing_rejection_reason(refs)
-        if routing_err is not None:
-            logger.warning("check_query: rejeitada por roteamento: {}", routing_err)
-            msg = ToolMessage(
-                content=f"Query REJEITADA pelo roteador: {routing_err}",
-                tool_call_id=query_tc["id"],
+            database_id, duck_table, duck_physical = _resolve_target(
+                sql, state.get("resolved_shards", {}), multi
             )
-            return {"messages": [msg, *extra], "pending_query": None}
+            use_duckdb = False
+            if duck_table is not None:
+                if duck_table.id in multi:
+                    use_duckdb = True
+                else:
+                    use_duckdb = needs_duckdb(duck_table, sql)
+            pending.append(
+                {
+                    "sql": sql,
+                    "tool_call_id": query_tc["id"],
+                    "database_id": database_id,
+                    "use_duckdb": use_duckdb,
+                    "duck_table_id": duck_table.id if duck_table else None,
+                    "duck_physical": duck_physical,
+                }
+            )
+            slots_used += 1
+            logger.info(
+                "check_query: query aprovada (db={}, duckdb={})",
+                database_id,
+                use_duckdb,
+            )
 
-        database_id, duck_table, duck_physical = _resolve_target(
-            sql, state.get("resolved_shards", {}), multi
-        )
-        use_duckdb = False
-        if duck_table is not None:
-            if duck_table.id in multi:
-                use_duckdb = True
-            else:
-                use_duckdb = needs_duckdb(duck_table, sql)
-        pending = {
-            "sql": sql,
-            "tool_call_id": query_tc["id"],
-            "database_id": database_id,
-            "use_duckdb": use_duckdb,
-            "duck_table_id": duck_table.id if duck_table else None,
-            "duck_physical": duck_physical,
-        }
-        logger.info("check_query: query aprovada (db={}, duckdb={})", database_id, use_duckdb)
-        return {"messages": extra, "pending_query": pending}
+        return {"messages": messages, "pending_queries": pending}
 
-    def run_query(state: AgentState) -> dict[str, Any]:
-        """Executa a query diretamente no banco de origem."""
-        pending = state["pending_query"]
-        assert pending is not None
-        sql = pending["sql"]
-        database_id = pending["database_id"]
-        logger.info("run_query: executando no banco {!r}", database_id)
-        try:
-            rows = registry.execute(database_id, sql)
-            content = _rows_to_text(rows, config.max_string_length, config.top_k)
-        except (sa_exc.SQLAlchemyError, ReadOnlyViolationError) as err:
-            logger.warning("run_query: erro de execução: {}", err)
-            content = f"ERRO ao executar a query: {err}"
-        msg = ToolMessage(content=content, tool_call_id=pending["tool_call_id"])
-        return {
-            "messages": [msg],
-            "page_count": state.get("page_count", 0) + 1,
-            "pending_query": None,
-        }
+    def execute_queries(state: AgentState) -> dict[str, Any]:
+        """Executa a fila ``pending_queries`` em sequência (OLTP ou DuckDB)."""
+        queue = list(state.get("pending_queries") or [])
+        if not queue:
+            return {"pending_queries": []}
 
-    def materialize_duckdb(state: AgentState) -> dict[str, Any]:
-        """Materializa a tabela volumétrica no DuckDB a partir da origem."""
-        pending = state["pending_query"]
-        assert pending is not None
         session = state.get("duckdb_session")
-        if session is None:
-            logger.warning("materialize_duckdb: sessão ausente; criando sob demanda")
-            session = DuckDBSession()
+        page_count = state.get("page_count", 0)
+        multi = state.get("multi_materialized") or {}
+        out: list[ToolMessage] = []
 
-        table = config.get_table(pending["duck_table_id"])
-        if session.is_materialized(table.id):
-            logger.info("materialize_duckdb: {!r} já materializada; pulando", table.id)
-            return {"duckdb_session": session}
+        for item in queue:
+            sql = item["sql"]
+            if item.get("use_duckdb"):
+                if session is None:
+                    logger.warning("execute_queries: sessão DuckDB ausente; criando")
+                    session = DuckDBSession()
+                table = config.get_table(item["duck_table_id"])
+                if not session.is_materialized(table.id):
+                    source_engine = registry.get_engine(item["database_id"])
+                    physical = item.get("duck_physical")
+                    try:
+                        session.materialize(
+                            table_config=table,
+                            source_engine=source_engine,
+                            physical_name=physical,
+                        )
+                    except Exception as err:  # noqa: BLE001
+                        logger.error("execute_queries: falha ao materializar: {}", err)
+                        out.append(
+                            ToolMessage(
+                                content=f"ERRO ao preparar a camada analítica: {err}",
+                                tool_call_id=item["tool_call_id"],
+                            )
+                        )
+                        page_count += 1
+                        continue
+                rewritten = _rewrite_for_duckdb(
+                    sql, item.get("duck_physical"), table.id, default_dialect
+                )
+                logger.info("execute_queries: DuckDB")
+                try:
+                    rows = session.execute(rewritten)
+                    content = _rows_to_text(rows, config.max_string_length, config.top_k)
+                    meta = multi.get(table.id)
+                    if meta and meta.get("truncated"):
+                        content = f"{content}\n\nAVISO: {meta.get('message', '')}"
+                except Exception as err:  # noqa: BLE001
+                    logger.warning("execute_queries: erro DuckDB: {}", err)
+                    content = f"ERRO ao executar a análise: {err}"
+            else:
+                database_id = item["database_id"]
+                logger.info("execute_queries: OLTP banco {!r}", database_id)
+                try:
+                    rows = registry.execute(database_id, sql)
+                    content = _rows_to_text(rows, config.max_string_length, config.top_k)
+                except (sa_exc.SQLAlchemyError, ReadOnlyViolationError) as err:
+                    logger.warning("execute_queries: erro OLTP: {}", err)
+                    content = f"ERRO ao executar a query: {err}"
 
-        source_engine = registry.get_engine(pending["database_id"])
-        physical = pending.get("duck_physical")
-        try:
-            session.materialize(
-                table_config=table,
-                source_engine=source_engine,
-                physical_name=physical,
-            )
-        except Exception as err:  # noqa: BLE001
-            logger.error("materialize_duckdb: falha ao materializar: {}", err)
-            msg = ToolMessage(
-                content=f"ERRO ao preparar a camada analítica: {err}",
-                tool_call_id=pending["tool_call_id"],
-            )
-            return {"messages": [msg], "pending_query": None, "duckdb_session": session}
-        return {"duckdb_session": session}
+            out.append(ToolMessage(content=content, tool_call_id=item["tool_call_id"]))
+            page_count += 1
 
-    def run_duckdb_query(state: AgentState) -> dict[str, Any]:
-        """Executa a query analítica no DuckDB (reescrevendo nome físico→lógico)."""
-        pending = state["pending_query"]
-        assert pending is not None
-        session = state["duckdb_session"]
-        table = config.get_table(pending["duck_table_id"])
-        physical = pending.get("duck_physical")
-
-        rewritten = _rewrite_for_duckdb(pending["sql"], physical, table.id, default_dialect)
-        logger.info("run_duckdb_query: executando query analítica no DuckDB")
-        try:
-            rows = session.execute(rewritten)
-            content = _rows_to_text(rows, config.max_string_length, config.top_k)
-            meta = (state.get("multi_materialized") or {}).get(table.id)
-            if meta and meta.get("truncated"):
-                content = f"{content}\n\nAVISO: {meta.get('message', '')}"
-        except Exception as err:  # noqa: BLE001
-            logger.warning("run_duckdb_query: erro: {}", err)
-            content = f"ERRO ao executar a análise: {err}"
-        msg = ToolMessage(content=content, tool_call_id=pending["tool_call_id"])
         return {
-            "messages": [msg],
-            "page_count": state.get("page_count", 0) + 1,
-            "pending_query": None,
+            "messages": out,
+            "page_count": page_count,
+            "pending_queries": [],
+            "duckdb_session": session,
         }
 
     # ------------------------------------------------------------------ #
@@ -603,15 +623,12 @@ def build_agent(
             return "get_schema"
         if "sql_db_query" in names:
             return "check_query"
-        # tool desconhecida — responde erro e volta a gerar
         return "run_resolve_shard" if shard_resolver else "check_query"
 
-    def route_execution(state: AgentState) -> str:
-        pending = state.get("pending_query")
-        if pending is None:
-            # query rejeitada/limite: volta a gerar para o LLM reagir
-            return "generate_query"
-        return "materialize_duckdb" if pending["use_duckdb"] else "run_query"
+    def route_after_check(state: AgentState) -> str:
+        if state.get("pending_queries"):
+            return "execute_queries"
+        return "generate_query"
 
     # ------------------------------------------------------------------ #
     # Montagem do grafo
@@ -624,9 +641,7 @@ def build_agent(
     graph.add_node("run_materialize_sharded", run_materialize_sharded)
     graph.add_node("get_schema", get_schema)
     graph.add_node("check_query", check_query)
-    graph.add_node("materialize_duckdb", materialize_duckdb)
-    graph.add_node("run_duckdb_query", run_duckdb_query)
-    graph.add_node("run_query", run_query)
+    graph.add_node("execute_queries", execute_queries)
 
     graph.add_edge(START, "init_turn")
     graph.add_conditional_edges("init_turn", route_discovery, ["load_schema", "generate_query"])
@@ -647,12 +662,10 @@ def build_agent(
     graph.add_edge("get_schema", "generate_query")
     graph.add_conditional_edges(
         "check_query",
-        route_execution,
-        ["materialize_duckdb", "run_query", "generate_query"],
+        route_after_check,
+        ["execute_queries", "generate_query"],
     )
-    graph.add_edge("materialize_duckdb", "run_duckdb_query")
-    graph.add_edge("run_duckdb_query", "generate_query")
-    graph.add_edge("run_query", "generate_query")
+    graph.add_edge("execute_queries", "generate_query")
 
     compiled = graph.compile(checkpointer=checkpointer)
     logger.info("Agente Text-to-SQL compilado com sucesso.")
