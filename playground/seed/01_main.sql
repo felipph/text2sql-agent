@@ -6,6 +6,6 @@ CREATE TABLE IF NOT EXISTS clientes (
 
 TRUNCATE TABLE clientes;
 
-INSERT INTO clientes (cnpj, razao_social) VALUES ('12345678000190', 'ACME');
-INSERT INTO clientes (cnpj, razao_social) VALUES ('55667788000111', 'Beta');
-INSERT INTO clientes (cnpj, razao_social) VALUES ('99988877000155', 'Gama');
+INSERT INTO clientes (cnpj, razao_social) VALUES ('65410433218196', 'Cliente_000');
+INSERT INTO clientes (cnpj, razao_social) VALUES ('71886379402654', 'Cliente_001');
+INSERT INTO clientes (cnpj, razao_social) VALUES ('61840781618495', 'Cliente_002');

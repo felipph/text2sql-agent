@@ -26,27 +26,32 @@ cp .env.example .env
 set -a && source .env && set +a
 ```
 
-## Seed
+## Seed (gerador paramétrico)
 
-O compose já aplica `seed/*.sql` no first boot. Para regenerar o SQL ou resetar
-dados sem recriar volumes:
+Parâmetros em `seed_params.yaml` (flags CLI sobrescrevem):
 
-```bash
-# na raiz do repo
-.venv/bin/python playground/seed_data.py --dump-sql playground/seed
-.venv/bin/python playground/seed_data.py --apply
+```yaml
+cnpjs: 3
+por_cnpj: 3
+seed: 42          # ignorado com --random
 ```
 
-### Gabarito
+```bash
+# na raiz do repo — regenera SQL + prompts.yaml e aplica nos Postgres
+.venv/bin/python playground/seed_data.py --apply --dump-sql
 
-| CNPJ | Cliente | Soma |
-|------|---------|------|
-| `12345678000190` | ACME | 175 |
-| `55667788000111` | Beta | 280 |
-| `99988877000155` | Gama | 40 |
-| ACME + Beta | — | 455 |
+# mais volume
+.venv/bin/python playground/seed_data.py --cnpjs 20 --por-cnpj 10 --apply --dump-sql
 
-Cliente com recebível `vencido` → **Gama**.
+# aleatório (sem seed fixo)
+.venv/bin/python playground/seed_data.py --random --apply --dump-sql
+```
+
+O script sempre reescreve `prompts.yaml` com perguntas e `expected` derivados
+dos dados gerados. O compose usa `seed/*.sql` só no first boot; depois use
+`--apply` para resetar sem `docker compose down -v`.
+
+O gabarito é impresso no stdout a cada execução.
 
 ## Rodar a UI
 
