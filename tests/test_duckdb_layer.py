@@ -82,3 +82,78 @@ def test_materialize_respects_fetch_limit(monkeypatch: pytest.MonkeyPatch) -> No
         assert rows[0]["c"] == 15
     finally:
         session.close()
+
+
+def _source_engine_filtered():
+    engine = create_engine("sqlite:///:memory:")
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE origem (cnpj TEXT, valor REAL)"))
+        conn.execute(
+            text("INSERT INTO origem (cnpj, valor) VALUES (:c, :v)"),
+            [
+                {"c": "111", "v": 10.0},
+                {"c": "222", "v": 20.0},
+                {"c": "111", "v": 5.0},
+            ],
+        )
+    return engine
+
+
+def test_materialize_append_merges_sources() -> None:
+    eng_a = create_engine("sqlite:///:memory:")
+    eng_b = create_engine("sqlite:///:memory:")
+    with eng_a.begin() as c:
+        c.execute(text("CREATE TABLE t_a (cnpj TEXT, valor REAL)"))
+        c.execute(text("INSERT INTO t_a VALUES ('111', 10.0)"))
+    with eng_b.begin() as c:
+        c.execute(text("CREATE TABLE t_b (cnpj TEXT, valor REAL)"))
+        c.execute(text("INSERT INTO t_b VALUES ('222', 20.0)"))
+    cfg = _table()
+    session = DuckDBSession()
+    try:
+        session.materialize(cfg, eng_a, physical_name="t_a", replace=True)
+        session.materialize(cfg, eng_b, physical_name="t_b", append=True)
+        rows = session.execute(
+            "SELECT cnpj, SUM(valor) AS s FROM origem_logica GROUP BY cnpj ORDER BY cnpj"
+        )
+        assert [(r["cnpj"], r["s"]) for r in rows] == [("111", 10.0), ("222", 20.0)]
+    finally:
+        session.close()
+
+
+def test_materialize_replace_clears_previous() -> None:
+    eng = _source_engine_with_rows(3)
+    session = DuckDBSession()
+    try:
+        cfg = _table()
+        session.materialize(cfg, eng, physical_name="origem")
+        session.materialize(cfg, eng, physical_name="origem", replace=True)
+        rows = session.execute("SELECT COUNT(*) AS c FROM origem_logica")
+        assert rows[0]["c"] == 3
+    finally:
+        session.close()
+
+
+def test_materialize_filter_sql() -> None:
+    eng = _source_engine_filtered()
+    session = DuckDBSession()
+    try:
+        session.materialize(
+            _table(), eng, physical_name="origem", filter_sql="cnpj IN ('111')"
+        )
+        rows = session.execute("SELECT COUNT(*) AS c FROM origem_logica")
+        assert rows[0]["c"] == 2
+    finally:
+        session.close()
+
+
+def test_materialize_append_and_replace_raise() -> None:
+    eng = _source_engine_with_rows(1)
+    session = DuckDBSession()
+    try:
+        with pytest.raises(ValueError, match="mutuamente"):
+            session.materialize(
+                _table(), eng, physical_name="origem", append=True, replace=True
+            )
+    finally:
+        session.close()

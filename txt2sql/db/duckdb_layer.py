@@ -83,6 +83,9 @@ class DuckDBSession:
         source_engine: Engine,
         physical_name: str | None = None,
         filter_sql: str | None = None,
+        *,
+        append: bool = False,
+        replace: bool = False,
     ) -> None:
         """Materializa as linhas brutas de uma tabela de origem no DuckDB.
 
@@ -93,12 +96,24 @@ class DuckDBSession:
                 Se ``None``, usa ``table_config.qualified_name``.
             filter_sql: Cláusula ``WHERE`` opcional (sem a palavra ``WHERE``)
                 para reduzir o volume trazido do banco de origem.
+            append: Se ``True`` e a tabela lógica já existe, apenas insere linhas.
+            replace: Se ``True``, descarta a tabela lógica existente antes de
+                materializar de novo.
 
         A tabela DuckDB criada usa o nome lógico ``table_config.id`` para que a
         query analítica original (reescrita para o nome lógico) funcione.
         """
+        if append and replace:
+            raise ValueError("append e replace são mutuamente exclusivos")
+
         logical_name = table_config.id
-        if logical_name in self._materialized:
+        if replace and logical_name in self._materialized:
+            self._conn.execute(f'DROP TABLE IF EXISTS "{logical_name}"')
+            self._materialized.discard(logical_name)
+            logger.debug("Tabela {!r} removida para replace", logical_name)
+
+        already = logical_name in self._materialized
+        if already and not append:
             logger.debug("Tabela {!r} já materializada; pulando", logical_name)
             return
 
@@ -109,10 +124,11 @@ class DuckDBSession:
         select_sql = f"SELECT * FROM {source_name}{where_part} LIMIT {fetch_limit}"
 
         logger.info(
-            "Materializando {!r} no DuckDB a partir de {!r} (limit={})",
+            "Materializando {!r} no DuckDB a partir de {!r} (limit={}, append={})",
             logical_name,
             source_name,
             fetch_limit,
+            append and already,
         )
 
         total_rows = 0
@@ -121,7 +137,17 @@ class DuckDBSession:
             columns = list(result.keys())
             first_batch = [tuple(r) for r in result.fetchmany(BATCH_SIZE)]
 
-            if not first_batch:
+            if already and append:
+                if first_batch:
+                    self._insert_batch(logical_name, columns, first_batch)
+                    total_rows += len(first_batch)
+                    while True:
+                        batch = [tuple(r) for r in result.fetchmany(BATCH_SIZE)]
+                        if not batch:
+                            break
+                        self._insert_batch(logical_name, columns, batch)
+                        total_rows += len(batch)
+            elif not first_batch:
                 self._create_empty_table(logical_name, columns)
             else:
                 self._conn.execute(
