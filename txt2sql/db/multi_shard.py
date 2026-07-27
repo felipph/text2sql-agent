@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from loguru import logger
+from sqlalchemy import inspect
 
 from txt2sql.config import TableConfig
 from txt2sql.db.duckdb_layer import DuckDBSession
@@ -37,6 +38,12 @@ def build_in_filter(column: str, values: list[str]) -> str:
     """Monta ``col IN ('a', 'b')`` com escape de aspas simples."""
     literals = ", ".join("'" + v.replace("'", "''") + "'" for v in values)
     return f"{column} IN ({literals})"
+
+
+def _physical_table_exists(engine: Any, table_name: str) -> bool:
+    """Verifica se a tabela física existe no banco (sem schema qualificado)."""
+    name = table_name.split(".")[-1]
+    return inspect(engine).has_table(name)
 
 
 def materialize_sharded_values(
@@ -86,6 +93,27 @@ def materialize_sharded_values(
         groups.setdefault(key, []).append(v)
 
     disc_col = table.sharding.discriminator_column
+
+    missing: list[str] = []
+    for (db_id, physical), group_vals in groups.items():
+        engine = registry.get_engine(db_id)
+        try:
+            exists = _physical_table_exists(engine, physical)
+        except Exception as err:
+            raise ValueError(
+                f"Falha ao verificar tabela física {physical!r} em {db_id!r}: {err}"
+            ) from err
+        if not exists:
+            missing.append(
+                f"{physical} (banco={db_id}, discriminadores={group_vals})"
+            )
+    if missing:
+        raise ValueError(
+            "Tabela(s) física(s) inexistente(s) no shard — não é possível "
+            "materializar. Verifique o seed/dados ou os CNPJs. Ausentes: "
+            + "; ".join(missing)
+        )
+
     first = True
     for (db_id, physical), group_vals in groups.items():
         engine = registry.get_engine(db_id)

@@ -191,6 +191,28 @@ def test_materialize_sharded_values_rejects_single() -> None:
         session.close()
 
 
+def test_materialize_rejects_missing_physical_table() -> None:
+    registry, resolver, config = _build_registry_and_resolver()
+
+    def _bad_resolver(v: str) -> ShardResult:
+        return ShardResult(database_id="db_a", table_name="rec_missing")
+
+    resolver._resolvers = {"recebiveis": _bad_resolver}  # type: ignore[attr-defined]
+    session = DuckDBSession()
+    try:
+        with pytest.raises(ValueError, match="inexistente"):
+            materialize_sharded_values(
+                table=config.get_table("recebiveis"),
+                values=["111", "122"],
+                max_discriminators=20,
+                resolver=resolver,
+                registry=registry,
+                session=session,
+            )
+    finally:
+        session.close()
+
+
 def test_prompt_mentions_materialize_sharded_table() -> None:
     from txt2sql.prompts import Txt2SqlPromptBuilder
 

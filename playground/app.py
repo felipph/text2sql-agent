@@ -7,6 +7,7 @@ Execute a partir da raiz do repositório:
 
 from __future__ import annotations
 
+import json
 import os
 import uuid
 from pathlib import Path
@@ -24,6 +25,7 @@ from txt2sql import build_agent, load_config
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config.yaml"
 PROMPTS_PATH = ROOT / "prompts.yaml"
+MANIFEST_PATH = ROOT / "seed_manifest.json"
 
 DB_ENVS = {
     "db_main": "MAIN_DB_URL",
@@ -45,6 +47,27 @@ def ping_db(url: str) -> tuple[bool, str]:
         return True, "ok"
     except Exception as exc:  # noqa: BLE001 — UI precisa mostrar qualquer falha
         return False, str(exc)
+
+
+def _check_seed_sync(main_url: str) -> str | None:
+    """Compara COUNT(clientes) com o manifesto; None se ok ou sem manifesto."""
+    if not MANIFEST_PATH.is_file():
+        return None
+    try:
+        manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+        expected_n = len(manifest.get("clientes") or [])
+        engine = create_engine(main_url)
+        with engine.connect() as conn:
+            n = int(conn.execute(text("SELECT COUNT(*) FROM clientes")).scalar() or 0)
+        if n != expected_n:
+            return (
+                f"Seed dessincronizado: banco tem {n} cliente(s), "
+                f"manifesto/prompts esperam {expected_n}. "
+                "Rode `python playground/seed_data.py --apply --dump-sql`."
+            )
+    except Exception as exc:  # noqa: BLE001
+        return f"Não foi possível validar seed vs manifesto: {exc}"
+    return None
 
 
 @st.cache_resource
@@ -118,6 +141,12 @@ def main() -> None:
             else:
                 st.error(f"{label}: {detail}")
                 all_ok = False
+
+        main_url = os.environ.get("MAIN_DB_URL")
+        if all_ok and main_url:
+            sync_msg = _check_seed_sync(main_url)
+            if sync_msg:
+                st.warning(sync_msg)
 
         st.divider()
         st.text(f"YAML: {CONFIG_PATH.name}")

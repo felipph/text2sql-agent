@@ -12,6 +12,7 @@ Uso:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import random
 import sys
@@ -28,6 +29,7 @@ ROOT = Path(__file__).resolve().parent
 DEFAULT_PARAMS = ROOT / "seed_params.yaml"
 DEFAULT_PROMPTS = ROOT / "prompts.yaml"
 DEFAULT_SEED_DIR = ROOT / "seed"
+DEFAULT_MANIFEST = ROOT / "seed_manifest.json"
 
 STATUSES = ("pago", "pendente", "vencido")
 
@@ -233,6 +235,26 @@ def write_prompts(dataset: Dataset, path: Path | None = None) -> Path:
     return path
 
 
+def write_manifest(
+    dataset: Dataset,
+    params: SeedParams,
+    path: Path | None = None,
+) -> Path:
+    """Grava manifesto para a UI detectar dessincronia seed↔banco."""
+    path = path or DEFAULT_MANIFEST
+    payload = {
+        "cnpjs": params.cnpjs,
+        "por_cnpj": params.por_cnpj,
+        "seed": params.seed,
+        "clientes": [
+            {"cnpj": c["cnpj"], "razao_social": c["razao_social"]} for c in dataset.clientes
+        ],
+        "sums": {c["cnpj"]: dataset.sum_for(c["cnpj"]) for c in dataset.clientes},
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
 def _sql_main(dataset: Dataset) -> str:
     inserts = "\n".join(
         f"INSERT INTO clientes (cnpj, razao_social) VALUES "
@@ -408,6 +430,8 @@ def main(argv: list[str] | None = None) -> int:
 
     prompts_path = write_prompts(dataset, args.prompts)
     print(f"wrote {prompts_path}")
+    manifest_path = write_manifest(dataset, params)
+    print(f"wrote {manifest_path}")
 
     if args.dump_sql:
         paths = dump_sql(dataset, Path(args.dump_sql))

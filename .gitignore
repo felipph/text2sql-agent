@@ -16,3 +16,4 @@ __pycache__
 .superpowers/
 playground/seed/
 playground/logs/
+playground/seed_manifest.json

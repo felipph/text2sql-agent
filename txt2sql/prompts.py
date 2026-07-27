@@ -196,6 +196,12 @@ class Txt2SqlPromptBuilder:
                 "F. Você pode emitir várias `sql_db_query` no mesmo passo (ex.: filtrar "
                 "recebíveis e buscar razão social); elas rodam em sequência."
             ),
+            (
+                "G. Se `materialize_sharded_table` (ou resolve_shard) retornar ERRO, "
+                "NÃO invente resposta parcial com resolve_shard de um subconjunto "
+                "nem consulte um único físico com IN de vários CNPJs. Explique a "
+                "falha ao usuário ou corrija os discriminadores/seed e tente de novo."
+            ),
             "",
             "Discriminadores por tabela:",
         ]
