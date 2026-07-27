@@ -163,11 +163,34 @@ class Txt2SqlPromptBuilder:
             ),
             (
                 "7. NUNCA faça JOIN (nem FROM com várias tabelas) misturando tabela "
-                "não-shardada e tabela shardada na mesma query SQL no OLTP — os "
-                "dados vivem em bancos diferentes. Também é proibido usar o nome "
-                "lógico da shardada sem materialize prévio. Correlacione em "
-                "passos: consulte cada lado separadamente (ou só o lógico no "
-                "DuckDB após materialize) e combine na resposta final."
+                "não-shardada e tabela shardada na mesma query SQL — bancos "
+                "diferentes. Correlacione em passos e combine na resposta final."
+            ),
+            "",
+            (
+                'Receita quando a pergunta NÃO traz o discriminador '
+                '(ex.: "clientes com recebível vencido"):'
+            ),
+            (
+                "A. `sql_db_query` na tabela NÃO shardada para listar os discriminadores "
+                "(ex.: `SELECT cnpj FROM clientes`)."
+            ),
+            (
+                "B. Com a lista: se 2+ valores → `materialize_sharded_table`; se 1 → "
+                "`resolve_shard`."
+            ),
+            (
+                "C. Só então `sql_db_query` na shardada (nome lógico após materialize, "
+                "ou nome físico após resolve) filtrando o critério (ex.: status)."
+            ),
+            (
+                "D. Se precisar da razão social, nova query só em `clientes` com os "
+                "CNPJs encontrados — NUNCA JOIN cross-database."
+            ),
+            (
+                "E. Se o roteador/guardrail rejeitar uma query, NÃO desista com dado "
+                "parcial irrelevante: corrija seguindo A–D e responda com a evidência "
+                "completa."
             ),
             "",
             "Discriminadores por tabela:",

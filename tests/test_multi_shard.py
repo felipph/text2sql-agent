@@ -203,3 +203,5 @@ def test_prompt_mentions_materialize_sharded_table() -> None:
     prompt = Txt2SqlPromptBuilder(config).build()
     assert "materialize_sharded_table" in prompt
     assert "nome lógico" in prompt.lower()
+    assert "Receita quando a pergunta NÃO traz o discriminador" in prompt
+    assert "liste os discriminadores" in prompt.lower() or "SELECT cnpj" in prompt

@@ -144,9 +144,13 @@ def routing_rejection_reason(refs: list[TableRef]) -> str | None:
         names = ", ".join(f"`{r.name}`" for r in unresolved)
         return (
             f"Tabela(s) shardada(s) referenciada(s) pelo nome lógico sem "
-            f"`resolve_shard` (1 discriminador → nome físico) nem "
-            f"`materialize_sharded_table` (2+ discriminadores → nome lógico no "
-            f"DuckDB): {names}. Não faça JOIN dessa tabela com outras no OLTP."
+            f"`resolve_shard` nem `materialize_sharded_table`: {names}. "
+            "Próximo passo: (1) liste os discriminadores com SELECT em tabela "
+            "NÃO shardada (ex. clientes.cnpj); (2) se 2+ valores chame "
+            "`materialize_sharded_table`, se 1 chame `resolve_shard`; "
+            "(3) só então consulte a shardada (nome lógico no DuckDB ou nome "
+            "físico no shard). Não faça JOIN cross-database; não responda só "
+            "com um pedaço irrelevante de outra tabela."
         )
 
     destinations: set[str] = set()
@@ -155,15 +159,16 @@ def routing_rejection_reason(refs: list[TableRef]) -> str | None:
             destinations.add("duckdb")
         elif r.kind in ("non_sharded", "resolved_physical") and r.database_id:
             destinations.add(r.database_id)
-        # unknown: deixado para o guardrail de allowlist / erro de execução
 
     if len(destinations) > 1:
         detail = ", ".join(sorted(destinations))
         return (
-            "Consulta/JOIN cross-database não é permitida. As tabelas "
-            f"referenciadas resolvem para destinos distintos ({detail}). "
-            "Consulte um banco (ou o DuckDB após materialize) por vez; "
-            "correlacione resultados em passos separados se necessário."
+            "Consulta/JOIN cross-database não é permitida "
+            f"(destinos: {detail}). Próximo passo: consulte um destino por vez "
+            "— liste discriminadores na tabela não-shardada, materialize ou "
+            "resolva a shardada, filtre nela, e busque atributos (ex. razão "
+            "social) numa query separada em clientes. Não abandone o fluxo "
+            "com uma amostra LIMIT 1 sem responder a pergunta."
         )
 
     return None

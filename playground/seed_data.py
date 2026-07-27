@@ -209,9 +209,9 @@ def write_prompts(dataset: Dataset, path: Path | None = None) -> Path:
                 ),
                 "expected": vencido_cliente["razao_social"],
                 "notes": (
-                    "NÃO fazer JOIN cross-database. Passos: achar CNPJs com "
-                    "vencido (via materialize/resolves) e depois buscar razão "
-                    "social em clientes — ou o inverso."
+                    "Fluxo: SELECT cnpj FROM clientes → materialize_sharded_table "
+                    "(2+) ou resolve_shard (1) → filtrar recebiveis status=vencido "
+                    "→ SELECT razao_social em clientes. Sem JOIN cross-DB."
                 ),
             }
         )

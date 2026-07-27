@@ -76,4 +76,6 @@ llm:
 custom_section: |
   Playground de testes. recebiveis é SHARDADA por CNPJ (2 shards).
   1 CNPJ → resolve_shard; 2+ → materialize_sharded_table + nome lógico.
+  Sem discriminador na pergunta: liste CNPJs em clientes, materialize/resolva,
+  filtre recebiveis, depois busque razão social — NUNCA JOIN cross-database.
   NUNCA faça fan-out cego sem lista de discriminadores.
