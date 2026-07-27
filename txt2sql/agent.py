@@ -668,6 +668,7 @@ def build_agent(
     graph.add_edge("execute_queries", "generate_query")
 
     compiled = graph.compile(checkpointer=checkpointer)
+    compiled.get_graph().print_ascii()
     logger.info("Agente Text-to-SQL compilado com sucesso.")
     return compiled
 
