@@ -65,6 +65,11 @@ config = load_config("examples/recebiveis.yaml")
 agent = build_agent(config, checkpointer=MemorySaver())
 ```
 
+## Playground (Postgres + Streamlit)
+
+Para exercitar o agente contra Postgres real com sharding e painel de debug,
+veja [playground/README.md](../playground/README.md).
+
 ## Problemas comuns
 
 **`ModuleNotFoundError: pytest` / `ruff`**  

@@ -1,0 +1,79 @@
+# Config do playground: 1 main + 2 shards (recebíveis por CNPJ).
+dialect: postgres
+
+databases:
+  - id: db_main
+    connection_env: MAIN_DB_URL
+    read_only: true
+    connect_timeout: 10
+
+  - id: db_shard_1
+    connection_env: SHARD_1_DB_URL
+    read_only: true
+
+  - id: db_shard_2
+    connection_env: SHARD_2_DB_URL
+    read_only: true
+
+tables:
+  - id: clientes
+    database: db_main
+    schema: public
+    name: clientes
+    description: >-
+      Cadastro de clientes (PJ) com CNPJ e razão social. Não shardada.
+
+  - id: recebiveis
+    database: db_main
+    schema: public
+    name: recebiveis
+    description: >-
+      Títulos a receber. Shardada por CNPJ em 2 bancos; agregações via DuckDB.
+    sharding:
+      discriminator_column: cnpj
+      resolver: "playground.shard_resolver:resolve_cnpj_shard"
+    columns:
+      - name: cnpj
+        type: VARCHAR
+        description: "CNPJ 14 dígitos."
+      - name: valor
+        type: NUMERIC
+        description: "Valor bruto BRL."
+      - name: data_vencimento
+        type: DATE
+        description: "Vencimento YYYY-MM-DD."
+      - name: status
+        type: VARCHAR
+        description: "pendente | pago | vencido"
+    duckdb:
+      enabled: true
+      trigger: aggregation
+      fetch_limit: 100000
+
+relationships:
+  - from: { table: recebiveis, column: cnpj }
+    to: { table: clientes, column: cnpj }
+    description: "Recebível pertence ao cliente."
+
+glossary:
+  - term: recebível
+    definition: "Título de crédito a receber."
+  - term: CNPJ
+    definition: "14 dígitos, sem formatação."
+
+agent:
+  top_k: 50
+  max_pages: 10
+  max_string_length: 10000
+  read_only: true
+  max_shard_discriminators: 20
+
+llm:
+  deployment: gpt-4o
+  api_version: "2024-06-01"
+  temperature: 0.0
+
+custom_section: |
+  Playground de testes. recebiveis é SHARDADA por CNPJ (2 shards).
+  1 CNPJ → resolve_shard; 2+ → materialize_sharded_table + nome lógico.
+  NUNCA faça fan-out cego sem lista de discriminadores.

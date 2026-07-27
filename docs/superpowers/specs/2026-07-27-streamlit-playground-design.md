@@ -69,16 +69,16 @@ playground/
 
 | Serviço | Porta host | Papel |
 |---------|------------|-------|
-| `db_main` | 5432 | `clientes` (não shardada) |
-| `db_shard_1` | 5433 | `recebiveis_NNN` para prefixo CNPJ 000–499 |
-| `db_shard_2` | 5434 | `recebiveis_NNN` para prefixo CNPJ 500–999 |
+| `db_main` | 15432 | `clientes` (não shardada) |
+| `db_shard_1` | 15433 | `recebiveis_NNN` para prefixo CNPJ 000–499 |
+| `db_shard_2` | 15434 | `recebiveis_NNN` para prefixo CNPJ 500–999 |
 
 Credenciais locais fixas (ex.: user/pass/db `txt2sql` / `txt2sql` / `txt2sql`).
 Env vars documentadas em `.env.example`:
 
-- `MAIN_DB_URL=postgresql+psycopg://…@localhost:5432/txt2sql`
-- `SHARD_1_DB_URL=…@localhost:5433/txt2sql`
-- `SHARD_2_DB_URL=…@localhost:5434/txt2sql`
+- `MAIN_DB_URL=postgresql+psycopg://…@localhost:15432/txt2sql`
+- `SHARD_1_DB_URL=…@localhost:15433/txt2sql`
+- `SHARD_2_DB_URL=…@localhost:15434/txt2sql`
 
 ### Dados determinísticos
 
