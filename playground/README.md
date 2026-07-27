@@ -65,6 +65,12 @@ uv sync --extra playground
 Use as **perguntas prontas** na sidebar e compare a resposta / tools com o
 `expected` no painel de debug.
 
+Cada turno também grava o mesmo payload de debug:
+
+- no terminal (loguru `playground turn debug`)
+- em `playground/logs/turns.jsonl` (uma linha JSON por turno — útil para
+  revisar falhas e aprimorar prompts/agente)
+
 ## Layout
 
 - Sidebar: status dos DBs, thread, perguntas prontas

@@ -14,3 +14,5 @@ __pycache__
 .env
 .env.local
 .superpowers/
+playground/seed/
+playground/logs/

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from playground.debug_view import extract_turn_debug
@@ -74,3 +76,25 @@ def test_guardrail_reject_flag() -> None:
     ]
     debug = extract_turn_debug(messages)
     assert debug.looks_like_guardrail_reject is True
+
+
+def test_log_turn_debug_writes_jsonl(tmp_path: Path) -> None:
+    from playground.debug_view import DebugStep, TurnDebug, log_turn_debug
+
+    debug = TurnDebug(
+        steps=[DebugStep(name="sql_db_query", args={"query": "SELECT 1"}, result="[]")],
+        final_answer="ok",
+    )
+    path = tmp_path / "turns.jsonl"
+    payload = log_turn_debug(
+        debug,
+        question="q?",
+        thread_id="t1",
+        expected="ok",
+        jsonl_path=path,
+    )
+    assert payload["question"] == "q?"
+    assert payload["steps"][0]["name"] == "sql_db_query"
+    line = path.read_text(encoding="utf-8").strip()
+    assert '"thread_id": "t1"' in line
+    assert "sql_db_query" in line

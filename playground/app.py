@@ -18,7 +18,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
 from sqlalchemy import create_engine, text
 
-from playground.debug_view import TurnDebug, extract_turn_debug
+from playground.debug_view import TurnDebug, extract_turn_debug, log_turn_debug
 from txt2sql import build_agent, load_config
 
 ROOT = Path(__file__).resolve().parent
@@ -86,7 +86,15 @@ def _run_turn(agent: Any, question: str) -> None:
     )
     all_msgs = list(result.get("messages") or [])
     st.session_state.messages = all_msgs
-    st.session_state.last_debug = extract_turn_debug(all_msgs)
+    debug = extract_turn_debug(all_msgs)
+    st.session_state.last_debug = debug
+    log_turn_debug(
+        debug,
+        question=question,
+        thread_id=st.session_state.thread_id,
+        expected=st.session_state.get("expected"),
+        expected_notes=st.session_state.get("expected_notes"),
+    )
 
 
 def main() -> None:

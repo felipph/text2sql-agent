@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import json
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
+
+from loguru import logger
 
 
 @dataclass
@@ -27,7 +32,10 @@ _GUARDRAIL_MARKERS = (
     "rejeit",
     "read-only",
     "apenas select",
+    "roteador",
 )
+
+DEFAULT_TURN_LOG = Path(__file__).resolve().parent / "logs" / "turns.jsonl"
 
 
 def extract_turn_debug(messages: list[Any]) -> TurnDebug:
@@ -66,3 +74,54 @@ def extract_turn_debug(messages: list[Any]) -> TurnDebug:
         final_answer=final,
         looks_like_guardrail_reject=guardrail,
     )
+
+
+def turn_debug_payload(
+    debug: TurnDebug,
+    *,
+    question: str | None = None,
+    thread_id: str | None = None,
+    expected: str | None = None,
+    expected_notes: str | None = None,
+) -> dict[str, Any]:
+    """Serializa o mesmo conteúdo do painel de debug da UI."""
+    return {
+        "ts": datetime.now(UTC).isoformat(),
+        "thread_id": thread_id,
+        "question": question,
+        "expected": expected,
+        "expected_notes": expected_notes,
+        "looks_like_guardrail_reject": debug.looks_like_guardrail_reject,
+        "steps": [asdict(s) for s in debug.steps],
+        "final_answer": debug.final_answer,
+    }
+
+
+def log_turn_debug(
+    debug: TurnDebug,
+    *,
+    question: str | None = None,
+    thread_id: str | None = None,
+    expected: str | None = None,
+    expected_notes: str | None = None,
+    jsonl_path: Path | None = DEFAULT_TURN_LOG,
+) -> dict[str, Any]:
+    """Grava o debug do turno no loguru e (opcional) em ``turns.jsonl``."""
+    payload = turn_debug_payload(
+        debug,
+        question=question,
+        thread_id=thread_id,
+        expected=expected,
+        expected_notes=expected_notes,
+    )
+    body = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+    logger.info("playground turn debug\n{}", body)
+
+    if jsonl_path is not None:
+        jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(payload, ensure_ascii=False, default=str)
+        with jsonl_path.open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+        logger.debug("turn debug append → {}", jsonl_path)
+
+    return payload
