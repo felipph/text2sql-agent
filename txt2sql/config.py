@@ -289,6 +289,8 @@ class AgentConfig:
         sample_rows_in_table_info: Linhas de amostra no schema por default.
         custom_section: Texto livre anexado ao final do system prompt.
         dialect: Dialeto SQL principal (informado ao LLM e ao guardrail).
+        max_shard_discriminators: Máximo de discriminadores por chamada
+            ``materialize_sharded_table`` (fan-in multi-shard).
         llm: Configuração do provider LLM.
         override_connections: Overrides de connection string aplicados na carga.
     """
@@ -305,6 +307,7 @@ class AgentConfig:
     sample_rows_in_table_info: int = 3
     custom_section: str | None = None
     dialect: str | None = None
+    max_shard_discriminators: int = 20
 
     llm: LLMConfig = field(default_factory=LLMConfig)
     override_connections: dict[str, str] = field(default_factory=dict)
@@ -317,6 +320,10 @@ class AgentConfig:
 
     def _validate(self) -> None:
         """Valida integridade referencial da configuração."""
+        if self.max_shard_discriminators < 1:
+            raise ValueError(
+                f"max_shard_discriminators deve ser >= 1, recebido: {self.max_shard_discriminators}"
+            )
         if len(self._db_index) != len(self.databases):
             raise ValueError("IDs de databases duplicados na configuração")
         if len(self._table_index) != len(self.tables):
@@ -494,6 +501,7 @@ def load_config(
         sample_rows_in_table_info=int(agent_raw.get("sample_rows_in_table_info", 3)),
         custom_section=raw.get("custom_section"),
         dialect=raw.get("dialect"),
+        max_shard_discriminators=int(agent_raw.get("max_shard_discriminators", 20)),
         llm=llm,
         override_connections=override_connections or {},
     )
