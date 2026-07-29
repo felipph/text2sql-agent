@@ -1,6 +1,7 @@
 ---
 status: accepted
 date: 2026-07-27
+amended: 2026-07-29
 ---
 
 # ADR-0002: Sharding determinístico sem fan-out
@@ -17,18 +18,20 @@ Tabelas volumétricas estão particionadas em vários bancos físicos. Um agente
 
 ## Decision Outcome
 
-Chosen option: **resolver determinístico + tool `resolve_shard`, fan-out proibido**, because o domínio (ex.: CNPJ) já define o shard e evita varredura multi-banco.
+Chosen option: **resolver determinístico `(discriminador) → ShardResult`, fan-out proibido**, because o domínio (ex.: CNPJ) já define o shard e evita varredura multi-banco.
+
+**Emenda 2026-07-29 (dual-path):** no grafo padrão, a resolução ocorre no nó `resolve_and_route` via `resolve_routing` (callable dotted do YAML) — **sem tool LLM**. Ausência de discriminador em tabela shardada → clarificação HITL. Multi-discriminador → fan-in no DuckDB e path *analytical*. O caminho ReAct (`dual_path=False`) mantém as tools `resolve_shard` / `materialize_sharded_table`.
 
 ## Consequences
 
 **Positive:**
 - Custo e blast radius previsíveis por pergunta
-- Contrato explícito via `ShardResult`
-- Cross-shard com lista conhecida: fan-in via DuckDB (`materialize_sharded_table`);
-  fan-out cego continua proibido
+- Contrato explícito via `ShardResult` / `ShardRouting`
+- Cross-shard com lista conhecida: fan-in via DuckDB; fan-out cego continua proibido
 
 **Negative:**
-- LLM precisa ser instruído a resolver (single) ou materializar (multi) antes de consultar
+- Dual-path: IntentPlan precisa carregar o discriminador nos filtros (senão clarify)
+- ReAct: LLM precisa ser instruído a resolver (single) ou materializar (multi) antes de consultar
 - Análise multi limitada por `max_shard_discriminators` e `fetch_limit` por grupo físico
 
 **Neutral:**

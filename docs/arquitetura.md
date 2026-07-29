@@ -2,7 +2,7 @@
 
 ## Visão geral
 
-`txt2sql` é uma biblioteca que monta um grafo LangGraph para transformar perguntas em SQL seguro. A configuração YAML descreve bancos, tabelas lógicas, sharding e gatilhos DuckDB. Em runtime, o grafo carrega schema, resolve shards, valida SQL e executa no banco de origem ou numa sessão DuckDB efêmera do turno.
+`txt2sql` é uma biblioteca que monta um grafo LangGraph para transformar perguntas em SQL seguro. A configuração YAML descreve bancos, tabelas lógicas, sharding e gatilhos DuckDB. Em runtime, o grafo carrega schema, interpreta intenção, resolve shards de forma determinística, valida SQL (Policy Gate + guardrail) e executa no banco de origem ou numa sessão DuckDB associada ao `thread_id`.
 
 ## Diagrama
 
@@ -11,73 +11,77 @@ flowchart TB
   Caller[Caller / app hospedeira] --> BA[build_agent]
   YAML[Config YAML] --> LC[load_config]
   LC --> BA
-  BA --> Graph[CompiledStateGraph]
+  BA --> Graph[CompiledStateGraph dual-path]
 
-  Graph --> IT[init_turn]
-  IT --> LS[load_schema]
-  LS --> II[interpret_intent]
+  Graph --> IS[init_state]
+  IS --> II[interpret_intent]
   II -->|needs_clarification| AC[ask_clarification / HITL]
-  II -->|intent válido| GQ[generate_query]
-  GQ -->|resolve_shard| SR[ShardResolver]
-  GQ -->|materialize_sharded_table| MS[multi_shard fan-in]
-  GQ -->|sql_db_schema| SL[SchemaLoader]
-  GQ -->|sql_db_query| GR[guardrail.validate_sql]
-  GR -->|direto| REG[DatabaseRegistry / engines]
-  GR -->|duckdb| DD[DuckDBSession.materialize]
-  MS --> DD
+  AC -->|resume| II
+  II -->|intent válido| RR[resolve_and_route]
+  RR -->|simple| SP[generate_sql → exec_source → verify → answer]
+  RR -->|analytical| AP[sufficiency_gate → plan_materialization → materialize → check_materialization → generate_analytical_sql → exec_duckdb → verify → answer]
+  SP --> PG[policy.check_sql_plan + guardrail]
+  AP --> PG
+  PG --> REG[DatabaseRegistry / engines]
+  AP --> DS[DuckDBSessionStore por thread_id]
+  DS --> DD[DuckDBSession]
   DD --> REG
 
   LLM[Azure OpenAI] --> II
-  LLM --> GQ
+  LLM --> SP
+  LLM --> AP
   REG --> DB[(Bancos físicos)]
 ```
 
-### Grafo dual-path (padrão)
+### Dual-path (padrão) vs ReAct legado
 
-`build_agent(...)` usa o grafo dual-path por padrão. Após `interpret_intent` o fluxo passa por `resolve_routing` (determinístico, sem tools de shard no LLM) e bifurca. Passe `dual_path=False` para o loop ReAct legado.
+`build_agent(...)` usa o grafo dual-path por padrão (`txt2sql.graph`). Após `interpret_intent`, `resolve_and_route` combina `resolve_routing` (shard) + `route_execution` (simple \| analytical) — **sem tools de shard no LLM**. Passe `dual_path=False` para o loop ReAct em `agent.py` (`generate_query` + tools `resolve_shard` / `sql_db_query` / …).
 
-```mermaid
-flowchart LR
-  II[interpret_intent] --> RR[resolve_routing]
-  RR -->|simple| SP[plan_sql → exec → verify → answer]
-  RR -->|analytical| AP[sufficiency_gate → plan_materialization → check_materialization → exec → verify → answer]
-  AP --> DS[DuckDBSessionStore por thread_id]
-```
-
-Sharding e `force_analytical` entram via routing/policy gate — não via `resolve_shard` no loop ReAct. O diagrama acima descreve o path dual-path (padrão); o path legado ReAct permanece com `dual_path=False`.
+Sharding e `force_analytical` entram via routing/policy — não via `resolve_shard` no loop ReAct. Detalhes: [ADR-0006](adr/0006-grafo-dual-path-padrao.md).
 
 ## Componentes
 
-**`build_agent` (`agent.py`)** — monta o grafo, injeta registry/schema/shard/DuckDB nos nós e compila com checkpointer opcional do caller.
+**`build_agent` (`agent.py`)** — entrypoint; com `dual_path=True` delega a `graph.build_graph`; com `False` monta o ReAct legado.
+
+**`build_graph` (`graph.py`)** — grafo dual-path: intent → route → simple/analytical, budgets, HITL, verify/answer.
 
 **`load_config` / `AgentConfig` (`config.py`)** — parse e validação do YAML; índices por `database_id` e `table_id`.
 
-**`DatabaseRegistry` (`db/registry.py`)** — cria engines SQLAlchemy (com listener read-only quando aplicável) e executa queries roteadas; execução OLTP em `sql_db_query` respeita `query_timeout` (deadline no cliente).
+**`intent` (`intent.py`)** — `IntentPlan` (structured output) + `validate_intent` fail-closed contra índice de colunas do `SchemaLoader`.
 
-**`SchemaLoader` (`db/schema.py`)** — schema declarativo ou discovery + amostras para o prompt/tool.
+**`artifacts` (`artifacts.py`)** — planos tipados (`SQLPlan`, `MaterializationPlan`, …), `Budget`, `DuckDBCatalog`.
 
-**`ShardResolver` (`db/shard.py`)** — tool `resolve_shard`; importa o callable dotted e cacheia resultados no estado do turno.
+**`shard_routing` / `path_routing`** — `resolve_routing` (discriminador → bindings) e `route_execution` (simple vs analytical).
 
-**`materialize_sharded_values` (`db/multi_shard.py`)** — fan-in: resolve N discriminadores, agrupa por físico, materializa no DuckDB com `WHERE disc IN (...)`.
+**`policy` (`policy.py`)** — Policy Gate composto (read-only, shard resolvido, volume, `force_analytical`) antes da execução.
 
-**`DuckDBSession` (`db/duckdb_layer.py`)** — materializa lotes da origem em DuckDB in-memory (create / append / replace) e reexecuta a query analítica.
+**`middleware` (`middleware.py`)** — compactação de resultados / factories de `ExecutionResult`.
+
+**`DatabaseRegistry` (`db/registry.py`)** — engines SQLAlchemy e execução roteada; `query_timeout` no cliente OLTP.
+
+**`SchemaLoader` (`db/schema.py`)** — schema declarativo ou discovery + amostras.
+
+**`ShardResolver` (`db/shard.py`)** — tool `resolve_shard` (ReAct); o dual-path reusa o callable dotted via `resolve_routing`.
+
+**`materialize_sharded_values` (`db/multi_shard.py`)** — fan-in multi-discriminador no DuckDB.
+
+**`DuckDBSession` / `DuckDBSessionStore`** — materialização em lotes; store file-backed por `thread_id` no dual-path.
 
 **`validate_sql` (`guardrail.py`)** — AST sqlglot fail-closed; denylist textual complementar.
 
-**`Txt2SqlPromptBuilder` / `build_llm`** — system prompt (SQL) e prompt de interpretação de intenção; cliente Azure OpenAI.
-
-**`intent` (`intent.py`)** — `IntentPlan` (structured output) + `validate_intent` fail-closed contra índice de colunas do `SchemaLoader`.
+**`Txt2SqlPromptBuilder` / `build_llm`** — system prompt (SQL) e prompt de intenção; cliente Azure OpenAI.
 
 ## Fluxo de dados (pergunta → resposta)
 
-1. Caller invoca o grafo com `HumanMessage` e `thread_id`.
-2. `init_turn` cria sessão DuckDB efêmera e zera contadores do turno.
-3. `load_schema` alimenta o contexto; `interpret_intent` produz um `IntentPlan` validado (ou pede clarificação via HITL).
-4. Com plan válido, o LLM em `generate_query` gera tool calls a partir do intent.
-5. Tabelas shardadas: single → `resolve_shard`; multi (2+) → `materialize_sharded_table` antes do SELECT analítico.
-6. `sql_db_query` → `check_query` (guardrail) → rota direta ou DuckDB.
-7. No caminho DuckDB: materializa da origem (ou reusa fan-in já feito) → query analítica.
-8. Resultado truncado (`top_k` / `max_string_length`) volta ao LLM até a resposta final; sessão DuckDB é descartada.
+1. Caller invoca o grafo com `HumanMessage` e `thread_id` (checkpointer recomendado para HITL).
+2. `init_state` prepara budget e contexto do turno (no dual-path, reusa sessão DuckDB do `thread_id` se existir).
+3. `interpret_intent` produz um `IntentPlan` validado — ou roteia para `ask_clarification` (interrupt / mensagem).
+4. `resolve_and_route` resolve shards e escolhe *simple* ou *analytical* (`force_analytical`, multi-shard, agregação em tabela DuckDB).
+5. **Simple:** LLM gera `SQLPlan` (postgres) → Policy Gate → `exec_source` → `verify` → `answer` (ou refine).
+6. **Analytical:** sufficiency gate (reuse/refresh) → plano de materialização → extract na origem → SQL DuckDB → `verify` → `answer`.
+7. Resultado compactado (`Budget.sample_rows` / truncamento) volta ao caminho de verificação até a resposta final.
+
+No ReAct (`dual_path=False`): após intent, o LLM chama tools (`resolve_shard` / `materialize_sharded_table` / `sql_db_query`); DuckDB é efêmero por turno.
 
 ## Dependências externas
 
@@ -94,6 +98,7 @@ Detalhes em [docs/adr/](adr/). Resumo:
 
 - Biblioteca standalone (sem FastAPI embutido) — ver ADR-0001.
 - Sharding determinístico sem fan-out — ADR-0002.
-- DuckDB intermediário por turno — ADR-0003.
+- DuckDB intermediário (turno / `thread_id`) — ADR-0003.
 - Guardrail read-only via sqlglot — ADR-0004.
 - Schema declarativo com discovery opcional — ADR-0005.
+- Grafo dual-path como padrão + Policy Gate — ADR-0006.

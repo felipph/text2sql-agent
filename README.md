@@ -10,12 +10,13 @@ Três diferenciais frente a um agente SQL tradicional:
 
 1. **Multi-banco + sharding determinístico** — `(discriminador) → (banco, tabela_física)`; fan-out é proibido.
 2. **Schema declarativo ou discovery** — YAML com descrições de negócio, ou reflection via SQLAlchemy.
-3. **DuckDB intermediário por turno** — agregações/ordens/joins em tabelas volumétricas materializam em DuckDB in-memory efêmero.
+3. **DuckDB intermediário** — agregações/ordens/joins em tabelas volumétricas materializam em DuckDB (por `thread_id` no dual-path; efêmero por turno no ReAct legado).
 
 ## Funcionalidades
 
-* **Grafo LangGraph** — orquestra tools `resolve_shard`, `sql_db_schema` e `sql_db_query`.
-* **Guardrail read-only** — validação fail-closed via AST do sqlglot + listener no engine.
+* **Grafo dual-path (padrão)** — `IntentPlan` → `resolve_and_route` → caminho *simple* ou *analytical*; passe `dual_path=False` para o loop ReAct legado com tools.
+* **Interpretação de intenção + HITL** — `interpret_intent` valida o plano; ambiguidade → clarificação (`interrupt` com checkpointer).
+* **Policy Gate + guardrail read-only** — validação fail-closed (sqlglot + regras de volume/`force_analytical`) antes de executar.
 * **Checkpointer externo** — a lib não gerencia sessão; o caller injeta `MemorySaver` ou equivalente.
 * **Tracing opcional** — Langfuse quando as env vars estão definidas.
 * **Config YAML** — bancos, tabelas, relacionamentos, glossário e LLM.
@@ -30,18 +31,20 @@ Três diferenciais frente a um agente SQL tradicional:
 ├── smoke_test.py               # Smoke das camadas de dados
 ├── smoke_test_graph.py         # Smoke do grafo (LLM falso)
 ├── examples/                   # YAMLs e resolver de shard de exemplo
-│   ├── recebiveis.yaml
-│   ├── diario.yaml
-│   └── shard_resolver_example.py
+├── playground/                 # Postgres + Streamlit (harness manual)
 ├── tests/                      # Testes unitários (pytest)
 ├── docs/                       # Documentação (ver seção abaixo)
 └── txt2sql/                    # Pacote principal
-    ├── agent.py                # Grafo LangGraph + build_agent
+    ├── agent.py                # build_agent (+ grafo ReAct legado)
+    ├── graph.py                # Grafo dual-path (padrão)
+    ├── intent.py               # IntentPlan + validate_intent
+    ├── artifacts.py            # Planos tipados, Budget, catálogo DuckDB
+    ├── policy.py               # Policy Gate pré-execução
     ├── config.py               # Dataclasses + load_config
     ├── guardrail.py            # Validação SQL read-only
-    ├── llm.py / prompts.py     # Azure OpenAI + system prompt
+    ├── llm.py / prompts.py     # Azure OpenAI + prompts
     ├── tracing.py              # Langfuse opcional
-    └── db/                     # Registry, schema, shard, DuckDB
+    └── db/                     # Registry, schema, shard, DuckDB, session_store
 ```
 
 ## Pré-requisitos
@@ -54,8 +57,8 @@ Três diferenciais frente a um agente SQL tradicional:
 
 * **LangGraph / LangChain** — orquestração do agente e tools
 * **SQLAlchemy 2** — engines e discovery de schema
-* **sqlglot** — parsing AST do guardrail
-* **DuckDB** — materialização analítica efêmera por turno
+* **sqlglot** — parsing AST do guardrail / Policy Gate
+* **DuckDB** — materialização analítica in-process
 * **PyYAML / loguru** — config e logs
 
 ## Instalação
@@ -70,6 +73,9 @@ pip install -e ".[langfuse]"
 
 # desenvolvimento (pytest, ruff):
 pip install -e ".[dev]"
+
+# playground (Streamlit + Postgres):
+pip install -e ".[playground]"
 ```
 
 ### Como usar
@@ -80,7 +86,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import HumanMessage
 
 config = load_config("examples/recebiveis.yaml")
-agent = build_agent(config, checkpointer=MemorySaver())
+agent = build_agent(config, checkpointer=MemorySaver())  # dual_path=True por padrão
 
 resultado = agent.invoke(
     {"messages": [HumanMessage(content="Total de recebíveis do CNPJ 12.345.678/0001-90?")]},
@@ -102,9 +108,10 @@ config = load_config(
 
 ## Observações e Restrições
 
-* Fan-out entre shards é proibido — sempre resolva o shard antes de consultar tabelas particionadas.
-* Queries de escrita são rejeitadas pelo guardrail (fail-closed).
-* A sessão DuckDB é efêmera por turno; não há persistência analítica entre turnos.
+* Fan-out entre shards é proibido — no dual-path o sharding entra via `resolve_and_route`; no ReAct, resolva o shard (ou materialize multi) antes de consultar.
+* Queries de escrita são rejeitadas pelo guardrail / Policy Gate (fail-closed).
+* Dual-path: sessão DuckDB por `thread_id` (reuse via sufficiency gate). ReAct (`dual_path=False`): sessão efêmera por turno.
+* Clarificação HITL exige checkpointer; sem ele o grafo emite a pergunta e encerra.
 * O checkpointer é responsabilidade do caller.
 
 ## Documentação
@@ -121,7 +128,7 @@ Specs/planos internos de features ficam em [`docs/superpowers/`](docs/superpower
 
 ## Responsáveis
 
-- **txt2sql** — <!-- TODO: e-mail / canal de contato do maintainer -->
+- **Felipph Calado** — <!-- TODO: e-mail / canal de contato preferido -->
 
 ## Licença
 

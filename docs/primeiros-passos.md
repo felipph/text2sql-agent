@@ -62,12 +62,16 @@ from txt2sql import build_agent, load_config
 from langgraph.checkpoint.memory import MemorySaver
 
 config = load_config("examples/recebiveis.yaml")
+# dual_path=True por padrão; checkpointer necessário para HITL (clarificação + resume)
 agent = build_agent(config, checkpointer=MemorySaver())
 ```
 
+Sem checkpointer, perguntas ambíguas recebem a clarificação e o grafo encerra
+(sem `Command(resume=...)`). Contrato: [API → HITL](referencia/api.md#hitl-clarificação).
+
 ## Playground (Postgres + Streamlit)
 
-Para exercitar o agente contra Postgres real com sharding e painel de debug,
+Para exercitar o agente contra Postgres real com sharding, clarificação HITL e painel de debug,
 veja [playground/README.md](../playground/README.md).
 
 ## Problemas comuns

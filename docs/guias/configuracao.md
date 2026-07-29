@@ -7,6 +7,7 @@ Como configurar um agente `txt2sql` para diferentes ambientes.
 1. **Arquivo YAML** — fonte principal (`load_config(path)`). Exemplos em `examples/`.
 2. **`override_connections`** — mapa `{database_id: connection_string}` passado a `load_config` (prioridade sobre YAML/env).
 3. **Env vars** — `connection_env` por banco + `AZURE_OPENAI_*` + `LANGFUSE_*`. Referência completa: [variáveis de ambiente](../referencia/variaveis-de-ambiente.md).
+4. **`build_agent(..., dual_path=True)`** — parâmetro de código (não YAML). `True` (padrão) = grafo dual-path; `False` = ReAct legado. Ver [API](../referencia/api.md).
 
 ## Blocos do YAML
 
@@ -22,6 +23,12 @@ Como configurar um agente `txt2sql` para diferentes ambientes.
 | `agent` | `top_k`, `max_pages`, `max_string_length`, `read_only`, `query_timeout` (default 30; `0` desliga) |
 | `llm` | Azure OpenAI (opcional se env vars completas) |
 | `custom_section` | Texto livre no system prompt |
+
+### DuckDB: `force_analytical` e `trigger`
+
+* `force_analytical: true` — obriga extract → DuckDB → análise (path *analytical* no dual-path; Policy Gate rejeita agg pesada na origem).
+* `trigger: always` — alias que força `force_analytical=True` no parse do YAML.
+* Demais triggers (`aggregation`, `order`, `join`) — no dual-path, agregação/`group_by` em tabela com `duckdb.enabled` também roteia para *analytical*; no ReAct, o trigger casa com a SQL da tool.
 
 ## Por ambiente
 
