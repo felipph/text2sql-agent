@@ -317,6 +317,198 @@ CASES: list[BreakCase] = [
         "postgres",
         None,
     ),
+    # --- 9. Allowlist bypass ---
+    (
+        "allow_schema_qualified_out",
+        "SELECT * FROM evil.proibida",
+        "postgres",
+        ["permitida"],
+    ),
+    (
+        "allow_catalog_db_schema",
+        "SELECT * FROM cat.sch.proibida",
+        "postgres",
+        ["permitida"],
+    ),
+    (
+        "allow_alias_hides_real",
+        "SELECT * FROM proibida AS permitida",
+        None,
+        ["permitida"],
+    ),
+    (
+        # CTE com nome allowlisted escondendo tabela fora do escopo no body
+        "allow_cte_name_masks_forbidden_table",
+        "WITH permitida AS (SELECT * FROM proibida) SELECT * FROM permitida",
+        None,
+        ["permitida"],
+    ),
+    (
+        "allow_join_sneak",
+        "SELECT p.* FROM permitida p JOIN proibida e ON p.id = e.id",
+        None,
+        ["permitida"],
+    ),
+    (
+        "allow_subquery_out",
+        "SELECT * FROM permitida WHERE id IN (SELECT id FROM proibida)",
+        None,
+        ["permitida"],
+    ),
+    # --- 10. Parse ambiguity / Command ---
+    (
+        "amb_grant",
+        "GRANT SELECT ON t TO public",
+        None,
+        None,
+    ),
+    (
+        "amb_revoke",
+        "REVOKE ALL ON t FROM public",
+        None,
+        None,
+    ),
+    (
+        "amb_shutdown",
+        "SHUTDOWN",
+        "tsql",
+        None,
+    ),
+    (
+        "amb_reconfigure",
+        "RECONFIGURE",
+        "tsql",
+        None,
+    ),
+    (
+        "amb_garbage_should_reject",
+        "THIS IS NOT SQL @@@",
+        None,
+        None,
+    ),
+    (
+        "amb_empty_parens",
+        "()",
+        None,
+        None,
+    ),
+    # --- 11. UNION / compostos ---
+    (
+        "union_with_delete_arm",
+        "SELECT 1 UNION ALL DELETE FROM t RETURNING 1",
+        "postgres",
+        None,
+    ),
+    (
+        "union_insert_arm",
+        "SELECT x FROM t UNION ALL INSERT INTO t(x) VALUES (1) RETURNING x",
+        "postgres",
+        None,
+    ),
+    (
+        "except_with_dml",
+        "SELECT 1 EXCEPT SELECT * FROM (DELETE FROM t RETURNING 1) d",
+        "postgres",
+        None,
+    ),
+    # --- 12. Side-effects em forma de SELECT (buracos esperados se aprovarem) ---
+    (
+        "side_set_config_role",
+        "SELECT set_config('role', 'postgres', false)",
+        "postgres",
+        None,
+    ),
+    (
+        "side_set_config_in_cte",
+        "WITH x AS (SELECT set_config('search_path', 'evil', true) AS r) SELECT * FROM x",
+        "postgres",
+        None,
+    ),
+    (
+        # adminpack: nome distinto de pg_write_file na denylist
+        "side_pg_file_write",
+        "SELECT pg_file_write('/tmp/x', 'a', true)",
+        "postgres",
+        None,
+    ),
+    (
+        "side_pg_advisory_lock",
+        "SELECT pg_advisory_lock(1)",
+        "postgres",
+        None,
+    ),
+    (
+        "side_pg_advisory_xact_lock",
+        "SELECT pg_advisory_xact_lock(42)",
+        "postgres",
+        None,
+    ),
+    (
+        "side_pg_sleep",
+        "SELECT pg_sleep(999)",
+        "postgres",
+        None,
+    ),
+    (
+        "side_pg_sleep_for",
+        "SELECT pg_sleep_for('5 minutes')",
+        "postgres",
+        None,
+    ),
+    (
+        "side_current_setting_sensitive",
+        "SELECT current_setting('data_directory')",
+        "postgres",
+        None,
+    ),
+    (
+        "side_pg_stat_file",
+        "SELECT * FROM pg_stat_file('/etc/passwd')",
+        "postgres",
+        None,
+    ),
+    (
+        "side_lo_create",
+        "SELECT lo_create(0)",
+        "postgres",
+        None,
+    ),
+    (
+        "side_lo_put",
+        "SELECT lo_put(1234, 0, 'ab')",
+        "postgres",
+        None,
+    ),
+    (
+        "side_pg_notify",
+        "SELECT pg_notify('q', 'payload')",
+        "postgres",
+        None,
+    ),
+    (
+        "side_pg_create_logical_replication_slot",
+        "SELECT * FROM pg_create_logical_replication_slot('x', 'test_decoding')",
+        "postgres",
+        None,
+    ),
+    (
+        "side_pg_drop_replication_slot",
+        "SELECT pg_drop_replication_slot('x')",
+        "postgres",
+        None,
+    ),
+    (
+        "side_select_assign_tsql",
+        "SELECT @x = id FROM t",
+        "tsql",
+        None,
+    ),
+    (
+        "side_openjson_tvf",
+        "SELECT * FROM OPENJSON('[]')",
+        "tsql",
+        None,
+    ),
 ]
 
 

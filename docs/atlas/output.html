@@ -1,0 +1,1177 @@
+<!DOCTYPE html>
+<html lang="pt-BR" data-ha-style="document">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>txt2sql — Dossiê Técnico do Agente Text-to-SQL</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --primary: #a03b00;
+  --primary-container: #c94c00;
+  --primary-fixed: #ffdbcd;
+  --primary-fixed-dim: #ffb597;
+  --on-primary: #ffffff;
+  --accent-glow: #E8400D;
+  --secondary: #d5baff;
+  --secondary-container: #7b40e0;
+  --tertiary: #4d44e3;
+  --accent-cyan: #00D4FF;
+  --bg: #fff8f6;
+  --surface: #fff8f6;
+  --surface-container-lowest: #ffffff;
+  --surface-container-low: #fbf2ef;
+  --surface-container: #f5ece9;
+  --surface-container-high: #efe6e3;
+  --fg-1: #1e1b19;
+  --fg-2: #594138;
+  --fg-muted: #8d7166;
+  --border: rgba(0, 0, 0, 0.06);
+  --border-strong: rgba(0, 0, 0, 0.12);
+  --outline-variant: #e1bfb2;
+  --green: #10b981;
+  --blue: #3b82f6;
+  --yellow: #f59e0b;
+  --red: #ef4444;
+  --font-headline: 'Space Grotesk', ui-sans-serif, system-ui, sans-serif;
+  --font-body: 'Plus Jakarta Sans', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'SF Mono', 'Menlo', ui-monospace, monospace;
+  --space-xs: 4px; --space-sm: 8px; --space-md: 12px;
+  --space-lg: 16px; --space-xl: 20px; --space-2xl: 24px;
+  --space-3xl: 32px; --space-4xl: 48px; --space-5xl: 64px;
+  --radius-sm: 8px; --radius-md: 12px; --radius-lg: 16px;
+  --radius-xl: 20px; --radius-2xl: 28px; --radius-pill: 9999px;
+  --shadow-sm: 0 1px 2px rgba(30, 27, 25, 0.04);
+  --shadow-md: 0 4px 12px rgba(30, 27, 25, 0.08);
+  --shadow-lg: 0 8px 24px rgba(30, 27, 25, 0.12);
+  --shadow-accent: 0 8px 24px rgba(160, 59, 0, 0.15);
+  --rail-w: 240px;
+  --margin-w: 280px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #060B18;
+    --surface: #0B1426;
+    --surface-container-lowest: #101D35;
+    --surface-container-low: #101D35;
+    --surface-container: #162544;
+    --surface-container-high: #1c2d52;
+    --fg-1: #F8FAFC;
+    --fg-2: #CBD5E1;
+    --fg-muted: #64748B;
+    --border: rgba(255, 255, 255, 0.08);
+    --border-strong: rgba(255, 255, 255, 0.14);
+    --primary: #FF6B35;
+    --accent-glow: #00D4FF;
+    --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
+    --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.5);
+    --outline-variant: #3a4558;
+    --primary-fixed: #3a2218;
+  }
+}
+*, *::before, *::after { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: 15px;
+  line-height: 1.55;
+  color: var(--fg-1);
+  background: var(--bg);
+}
+a { color: var(--primary); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+.document-shell { min-height: 100vh; }
+
+/* Cover */
+.cover {
+  padding: var(--space-5xl) var(--space-3xl) var(--space-4xl);
+  background:
+    radial-gradient(ellipse 80% 60% at 10% 0%, rgba(160,59,0,0.12), transparent 55%),
+    radial-gradient(ellipse 50% 40% at 90% 20%, rgba(123,64,224,0.08), transparent 50%),
+    var(--surface);
+  border-bottom: 1px solid var(--border-strong);
+}
+.cover-meta {
+  display: flex; flex-wrap: wrap; gap: var(--space-sm);
+  margin-bottom: var(--space-2xl);
+  font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--fg-muted); font-weight: 600;
+}
+.pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px; border-radius: var(--radius-pill);
+  background: var(--surface-container); border: 1px solid var(--border);
+  color: var(--fg-2); text-transform: none; letter-spacing: 0; font-weight: 500;
+}
+.pill strong { color: var(--primary); font-family: var(--font-mono); font-size: 11px; }
+.cover h1 {
+  font-family: var(--font-headline);
+  font-size: clamp(2rem, 4.5vw, 3.25rem);
+  font-weight: 700; letter-spacing: -0.02em; line-height: 1.1;
+  margin: 0 0 var(--space-lg);
+  max-width: 18ch;
+}
+.deck {
+  max-width: 62ch; font-size: 1.05rem; color: var(--fg-2);
+  margin: 0 0 var(--space-2xl);
+}
+.cover-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: var(--space-md);
+  max-width: 720px;
+}
+.fact {
+  padding: var(--space-md) var(--space-lg);
+  background: var(--surface-container-lowest);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+}
+.fact dt { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--fg-muted); margin-bottom: 4px; }
+.fact dd { margin: 0; font-family: var(--font-headline); font-weight: 600; font-size: 1.05rem; }
+
+.caveat-box {
+  margin-top: var(--space-2xl);
+  max-width: 72ch;
+  padding: var(--space-lg) var(--space-xl);
+  border-left: 3px solid var(--yellow);
+  background: var(--surface-container-low);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  font-size: 13.5px; color: var(--fg-2);
+}
+.caveat-box strong { color: var(--fg-1); }
+
+/* Layout grid */
+.workspace {
+  display: grid;
+  grid-template-columns: var(--rail-w) minmax(0, 1fr) var(--margin-w);
+  gap: 0;
+  align-items: start;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+.reader-rail {
+  position: sticky; top: 0;
+  height: 100vh; overflow-y: auto;
+  padding: var(--space-2xl) var(--space-lg);
+  border-right: 1px solid var(--border);
+  background: var(--surface-container-low);
+}
+.reader-rail h2 {
+  font-family: var(--font-headline); font-size: 11px;
+  text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--fg-muted); margin: 0 0 var(--space-md);
+}
+.mode-group {
+  display: flex; flex-direction: column; gap: var(--space-xs);
+  margin-bottom: var(--space-2xl);
+}
+.mode-btn, .nav-link {
+  display: block; width: 100%; text-align: left;
+  border: 1px solid transparent; background: transparent;
+  font-family: var(--font-body); font-size: 13px; color: var(--fg-2);
+  padding: 8px 10px; border-radius: var(--radius-sm); cursor: pointer;
+}
+.mode-btn:hover, .nav-link:hover { background: var(--surface-container); color: var(--fg-1); }
+.mode-btn[aria-pressed="true"] {
+  background: var(--primary-fixed); color: var(--fg-1);
+  border-color: var(--outline-variant); font-weight: 600;
+}
+.nav-link { text-decoration: none; color: var(--fg-2); }
+.nav-link.is-active { color: var(--primary); font-weight: 600; background: var(--surface-container); }
+.nav-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.search-wrap { margin-bottom: var(--space-xl); }
+.search-wrap input {
+  width: 100%; padding: 10px 12px;
+  border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+  background: var(--surface-container-lowest); color: var(--fg-1);
+  font-family: var(--font-body); font-size: 13px;
+}
+
+.main-sheet {
+  padding: var(--space-3xl) var(--space-3xl) var(--space-5xl);
+  min-width: 0;
+}
+.evidence-margin {
+  position: sticky; top: 0;
+  height: 100vh; overflow-y: auto;
+  padding: var(--space-2xl) var(--space-lg);
+  border-left: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 12.5px;
+}
+.evidence-margin h2 {
+  font-family: var(--font-headline); font-size: 11px;
+  text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--fg-muted); margin: 0 0 var(--space-md);
+}
+.evidence-card {
+  padding: var(--space-md);
+  margin-bottom: var(--space-md);
+  background: var(--surface-container-low);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.evidence-card .src {
+  font-family: var(--font-mono); font-size: 10.5px; color: var(--primary);
+  margin-bottom: 6px; word-break: break-all;
+}
+.evidence-card p { margin: 0; color: var(--fg-2); line-height: 1.45; }
+
+.body-section {
+  margin-bottom: var(--space-4xl);
+  scroll-margin-top: var(--space-2xl);
+}
+.body-section > h2 {
+  font-family: var(--font-headline);
+  font-size: 1.55rem; font-weight: 700; letter-spacing: -0.01em;
+  margin: 0 0 var(--space-md);
+  padding-bottom: var(--space-sm);
+  border-bottom: 1px solid var(--border-strong);
+}
+.body-section > h3 {
+  font-family: var(--font-headline);
+  font-size: 1.1rem; font-weight: 600;
+  margin: var(--space-2xl) 0 var(--space-md);
+}
+.body-section p { color: var(--fg-2); max-width: 72ch; }
+.lead { font-size: 1.05rem; color: var(--fg-1); }
+
+.claim-card {
+  margin: var(--space-lg) 0;
+  padding: var(--space-lg) var(--space-xl);
+  background: var(--surface-container-lowest);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--primary);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  box-shadow: var(--shadow-sm);
+}
+.claim-card h4 {
+  margin: 0 0 var(--space-sm);
+  font-family: var(--font-headline); font-size: 0.95rem;
+}
+.claim-card p { margin: 0; max-width: none; }
+
+.pull-quote {
+  margin: var(--space-2xl) 0;
+  padding: var(--space-xl) 0;
+  border-top: 1px solid var(--border-strong);
+  border-bottom: 1px solid var(--border-strong);
+  font-family: var(--font-headline);
+  font-size: 1.2rem; font-weight: 500; letter-spacing: -0.01em;
+  line-height: 1.35; max-width: 36ch; color: var(--fg-1);
+}
+.pull-quote cite {
+  display: block; margin-top: var(--space-sm);
+  font-family: var(--font-body); font-size: 12px; font-style: normal;
+  color: var(--fg-muted); font-weight: 500;
+}
+
+.fact-table {
+  width: 100%; border-collapse: collapse; font-size: 13.5px;
+  margin: var(--space-lg) 0; overflow-x: auto; display: block;
+}
+.fact-table table { width: 100%; border-collapse: collapse; min-width: 480px; }
+.fact-table th, .fact-table td {
+  text-align: left; padding: 10px 12px;
+  border-bottom: 1px solid var(--border); vertical-align: top;
+}
+.fact-table th {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--fg-muted); font-weight: 600;
+  background: var(--surface-container-low);
+}
+.fact-table code, .mono, pre, .code-inline {
+  font-family: var(--font-mono); font-size: 12px;
+}
+code {
+  font-family: var(--font-mono); font-size: 0.88em;
+  background: var(--surface-container); padding: 1px 5px;
+  border-radius: 4px;
+}
+.pre-block {
+  position: relative;
+  margin: var(--space-lg) 0;
+  background: var(--surface-container-high);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: auto;
+}
+.pre-block pre {
+  margin: 0; padding: var(--space-lg);
+  font-size: 12px; line-height: 1.5; color: var(--fg-1);
+  white-space: pre; overflow-x: auto;
+}
+.copy-btn {
+  position: absolute; top: 8px; right: 8px;
+  font-size: 11px; padding: 4px 8px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border-strong);
+  background: var(--surface-container-lowest);
+  color: var(--fg-2); cursor: pointer; font-family: var(--font-body);
+}
+.copy-btn:hover { color: var(--fg-1); }
+
+.tag {
+  display: inline-block; padding: 2px 8px; margin: 2px;
+  font-size: 11px; border-radius: var(--radius-pill);
+  background: var(--surface-container); color: var(--fg-2);
+  border: 1px solid var(--border);
+}
+.tag.warn { background: rgba(245,158,11,0.15); border-color: rgba(245,158,11,0.35); color: var(--fg-1); }
+.tag.ok { background: rgba(16,185,129,0.12); border-color: rgba(16,185,129,0.3); }
+.tag.gap { background: rgba(239,68,68,0.1); border-color: rgba(239,68,68,0.3); }
+
+.diagram {
+  margin: var(--space-xl) 0;
+  padding: var(--space-xl);
+  background: var(--surface-container-lowest);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  overflow-x: auto;
+}
+.diagram figcaption {
+  margin-top: var(--space-md);
+  font-size: 12px; color: var(--fg-muted);
+}
+.diagram svg { display: block; max-width: 100%; height: auto; }
+
+.def-list { margin: var(--space-lg) 0; }
+.def-list dt {
+  font-family: var(--font-headline); font-weight: 600; font-size: 0.95rem;
+  margin-top: var(--space-lg);
+}
+.def-list dd { margin: 4px 0 0; color: var(--fg-2); max-width: 68ch; }
+
+.module-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: var(--space-md);
+  margin: var(--space-lg) 0;
+}
+.module-card {
+  padding: var(--space-md) var(--space-lg);
+  background: var(--surface-container-low);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.module-card h4 {
+  margin: 0 0 6px; font-family: var(--font-mono); font-size: 12.5px; color: var(--primary);
+}
+.module-card p { margin: 0; font-size: 12.5px; color: var(--fg-2); max-width: none; }
+
+.flow-steps {
+  list-style: none; margin: var(--space-lg) 0; padding: 0;
+  counter-reset: step;
+}
+.flow-steps li {
+  position: relative;
+  padding: var(--space-md) var(--space-lg) var(--space-md) 48px;
+  border-left: 2px solid var(--outline-variant);
+  margin-left: 14px;
+}
+.flow-steps li::before {
+  counter-increment: step;
+  content: counter(step);
+  position: absolute; left: -13px; top: 14px;
+  width: 24px; height: 24px;
+  border-radius: 50%;
+  background: var(--primary); color: var(--on-primary);
+  font-size: 11px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--font-headline);
+}
+.flow-steps strong { color: var(--fg-1); }
+
+.question-panel {
+  margin-top: var(--space-4xl);
+  padding: var(--space-2xl);
+  background: var(--surface-container);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+}
+.question-panel h2 {
+  font-family: var(--font-headline); font-size: 1.2rem;
+  margin: 0 0 var(--space-md); border: none; padding: 0;
+}
+.question-panel ul { margin: 0; padding-left: 1.2em; color: var(--fg-2); }
+.question-panel li { margin-bottom: 8px; }
+
+.source-spread {
+  margin-top: var(--space-2xl);
+}
+.source-spread details {
+  margin-bottom: var(--space-sm);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-container-lowest);
+}
+.source-spread summary {
+  padding: 10px 14px; cursor: pointer; font-family: var(--font-mono);
+  font-size: 12.5px; font-weight: 500;
+}
+.source-spread .src-body {
+  padding: 0 14px 14px; font-size: 12.5px; color: var(--fg-2);
+}
+
+/* Reading modes */
+html[data-mode="summary"] .full-only { display: none !important; }
+html[data-mode="evidence"] .main-sheet .body-section > p,
+html[data-mode="evidence"] .main-sheet .flow-steps,
+html[data-mode="evidence"] .main-sheet .module-grid,
+html[data-mode="evidence"] .main-sheet .diagram { display: none !important; }
+html[data-mode="evidence"] .claim-card,
+html[data-mode="evidence"] .fact-table,
+html[data-mode="evidence"] .pull-quote,
+html[data-mode="evidence"] .caveat-box { display: block !important; }
+
+.mobile-toggle {
+  display: none;
+  position: fixed; bottom: 16px; right: 16px; z-index: 40;
+  width: 48px; height: 48px; border-radius: 50%;
+  background: var(--primary); color: var(--on-primary);
+  border: none; box-shadow: var(--shadow-accent);
+  font-size: 18px; cursor: pointer;
+}
+
+@media (max-width: 1100px) {
+  .workspace { grid-template-columns: var(--rail-w) minmax(0, 1fr); }
+  .evidence-margin { display: none; }
+  .workspace.show-evidence .evidence-margin {
+    display: block; position: fixed; inset: 0; z-index: 30;
+    height: 100vh; border: none;
+  }
+  .mobile-toggle { display: flex; align-items: center; justify-content: center; }
+}
+@media (max-width: 800px) {
+  .workspace { grid-template-columns: 1fr; }
+  .reader-rail {
+    position: static; height: auto;
+    border-right: none; border-bottom: 1px solid var(--border);
+  }
+  .cover { padding: var(--space-3xl) var(--space-lg); }
+  .main-sheet { padding: var(--space-2xl) var(--space-lg) var(--space-4xl); }
+}
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  * { transition: none !important; animation: none !important; }
+}
+.mark { background: rgba(160,59,0,0.2); border-radius: 2px; }
+</style>
+</head>
+<body>
+<div class="document-shell">
+
+<header class="cover" id="capa">
+  <div class="cover-meta">
+    <span class="pill">Dossiê técnico</span>
+    <span class="pill"><strong>txt2sql</strong> v0.1.0</span>
+    <span class="pill">Python ≥ 3.12</span>
+    <span class="pill">MIT</span>
+    <span class="pill">Fonte: repositório local</span>
+    <span class="pill">2026-07-29</span>
+  </div>
+  <h1>Como o agente Text-to-SQL funciona</h1>
+  <p class="deck">
+    Análise estruturada do pacote <code>txt2sql</code>: biblioteca standalone que compila um grafo LangGraph
+    para transformar perguntas em SQL seguro, com multi-banco, sharding determinístico,
+    Dual-path (simple | analytical) e camada DuckDB intermediária.
+  </p>
+  <dl class="cover-facts">
+    <div class="fact"><dt>Domínio</dt><dd>Text-to-SQL / OLTP-safe analytics</dd></div>
+    <div class="fact"><dt>Padrão</dt><dd>Grafo dual-path (padrão)</dd></div>
+    <div class="fact"><dt>Entrypoint</dt><dd>build_agent / load_config</dd></div>
+    <div class="fact"><dt>LOC pacote</dt><dd>~5,9k linhas</dd></div>
+    <div class="fact"><dt>ADRs</dt><dd>0001–0006 aceitos</dd></div>
+    <div class="fact"><dt>LLM</dt><dd>Azure OpenAI</dd></div>
+  </dl>
+  <aside class="caveat-box" role="note">
+    <strong>Escopo e premissas.</strong> Este dossiê baseia-se exclusivamente em código e documentação
+    presentes no repositório (README, AGENTS.md, docs/, ADRs, pacote <code>txt2sql/</code>).
+    Não descreve comportamento observado em produção externa. Lacunas docs↔código estão
+    explicitadas na seção “Divergências”.
+  </aside>
+</header>
+
+<div class="workspace" id="workspace">
+  <nav class="reader-rail" aria-label="Navegação do documento">
+    <h2>Modo de leitura</h2>
+    <div class="mode-group" role="group" aria-label="Modos">
+      <button type="button" class="mode-btn" data-mode="full" aria-pressed="true">Documento completo</button>
+      <button type="button" class="mode-btn" data-mode="summary" aria-pressed="false">Resumo 5 min</button>
+      <button type="button" class="mode-btn" data-mode="evidence" aria-pressed="false">Só evidências</button>
+    </div>
+    <div class="search-wrap">
+      <label for="doc-search" class="visually-hidden" style="position:absolute;width:1px;height:1px;overflow:hidden">Buscar</label>
+      <input type="search" id="doc-search" placeholder="Buscar no dossiê…" autocomplete="off">
+    </div>
+    <h2>Seções</h2>
+    <ul class="nav-list">
+      <li><a class="nav-link" href="#resumo">1. Resumo executivo</a></li>
+      <li><a class="nav-link" href="#proposito">2. Propósito e domínio</a></li>
+      <li><a class="nav-link" href="#stack">3. Stack e organização</a></li>
+      <li><a class="nav-link" href="#arquitetura">4. Arquitetura</a></li>
+      <li><a class="nav-link" href="#fluxo">5. Fluxo dual-path</a></li>
+      <li><a class="nav-link" href="#componentes">6. Componentes</a></li>
+      <li><a class="nav-link" href="#seguranca">7. Intent, Policy, Guardrail</a></li>
+      <li><a class="nav-link" href="#dados">8. Camada de dados</a></li>
+      <li><a class="nav-link" href="#config">9. Configuração YAML</a></li>
+      <li><a class="nav-link" href="#adrs">10. Decisões (ADRs)</a></li>
+      <li><a class="nav-link" href="#glossario">11. Glossário</a></li>
+      <li><a class="nav-link" href="#restricoes">12. Premissas e restrições</a></li>
+      <li><a class="nav-link" href="#gaps">13. Divergências</a></li>
+      <li><a class="nav-link" href="#fontes">14. Fontes</a></li>
+    </ul>
+  </nav>
+
+  <main class="main-sheet">
+
+    <!-- 1 -->
+    <section class="body-section" id="resumo" data-topics="overview">
+      <h2>1. Resumo executivo</h2>
+      <p class="lead">
+        <code>txt2sql</code> não é um serviço HTTP: é uma biblioteca Python que, a partir de um YAML
+        de bancos/tabelas e de um LLM Azure OpenAI, devolve um <em>CompiledStateGraph</em> LangGraph
+        pronto para <code>invoke</code>/<code>stream</code>.
+      </p>
+      <div class="claim-card">
+        <h4>Tese central</h4>
+        <p>
+          O diferencial não é “gerar SQL com LLM”, e sim <strong>separar intenção semântica de execução</strong>:
+          <code>IntentPlan</code> grounded → roteamento determinístico de shard/path → Policy Gate fail-closed →
+          execução na origem (simple) ou via materialização DuckDB (analytical).
+        </p>
+      </div>
+      <blockquote class="pull-quote">
+        Fan-out entre shards é proibido — o discriminator resolve um destino físico, não uma varredura.
+        <cite>ADR-0002 · docs/arquitetura.md</cite>
+      </blockquote>
+      <div class="fact-table full-only">
+        <table>
+          <thead><tr><th>Pergunta</th><th>Resposta evidenciada</th></tr></thead>
+          <tbody>
+            <tr><td>O que entrega?</td><td>Grafo LangGraph compilado + API <code>build_agent</code>/<code>load_config</code></td></tr>
+            <tr><td>Quem orquestra?</td><td>Caller (app hospedeira) — checkpointer e transporte externos</td></tr>
+            <tr><td>Path padrão?</td><td><code>dual_path=True</code> → <code>txt2sql.graph</code></td></tr>
+            <tr><td>Legado?</td><td><code>dual_path=False</code> → ReAct com tools em <code>agent.py</code></td></tr>
+            <tr><td>SQL seguro?</td><td>Guardrail sqlglot + Policy Gate + listener read-only no engine</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 2 -->
+    <section class="body-section" id="proposito" data-topics="domain">
+      <h2>2. Propósito e domínio de negócio</h2>
+      <p>
+        O domínio ilustrado nos exemplos (<code>examples/recebiveis.yaml</code>, playground) é
+        <strong>consulta analítica sobre títulos de crédito (recebíveis)</strong> particionados por CNPJ
+        em múltiplos bancos físicos, com cadastro de clientes no banco principal.
+        A biblioteca, porém, é genérica: qualquer schema descrito no YAML.
+      </p>
+      <div class="claim-card">
+        <h4>Problema que a lib resolve</h4>
+        <p>
+          Consultar vários bancos físicos e tabelas particionadas com cargas analíticas
+          <em>sem sobrecarregar o OLTP</em> — materializando extratos em DuckDB quando necessário
+          (README, ADR-0003, ADR-0006).
+        </p>
+      </div>
+      <h3 class="full-only">Três diferenciais (README)</h3>
+      <ol class="full-only">
+        <li><strong>Multi-banco + sharding determinístico</strong> — <code>(discriminador) → (banco, tabela_física)</code>.</li>
+        <li><strong>Schema declarativo ou discovery</strong> — YAML com colunas/descrições, ou reflection SQLAlchemy.</li>
+        <li><strong>DuckDB intermediário</strong> — por <code>thread_id</code> no dual-path; efêmero por turno no ReAct.</li>
+      </ol>
+    </section>
+
+    <!-- 3 -->
+    <section class="body-section" id="stack" data-topics="stack">
+      <h2>3. Stack, ferramentas e organização</h2>
+      <div class="fact-table">
+        <table>
+          <thead><tr><th>Camada</th><th>Tecnologia</th><th>Papel</th></tr></thead>
+          <tbody>
+            <tr><td>Linguagem</td><td>Python ≥ 3.12</td><td>Pacote setuptools</td></tr>
+            <tr><td>Orquestração</td><td>LangGraph / LangChain</td><td>Grafo de estado + messages</td></tr>
+            <tr><td>LLM</td><td>langchain-openai → AzureChatOpenAI</td><td>Intent + geração SQL</td></tr>
+            <tr><td>ORM/engines</td><td>SQLAlchemy 2</td><td>Conexões, discovery, execute</td></tr>
+            <tr><td>AST SQL</td><td>sqlglot ≥ 25</td><td>Guardrail / Policy Gate</td></tr>
+            <tr><td>Analítico</td><td>DuckDB ≥ 1</td><td>Materialização in-process</td></tr>
+            <tr><td>Config</td><td>PyYAML</td><td>AgentConfig</td></tr>
+            <tr><td>Logs</td><td>loguru</td><td>Observabilidade local</td></tr>
+            <tr><td>Layout (dep.)</td><td>grandalf</td><td>Presente em pyproject; uso não detalhado na doc de produto</td></tr>
+            <tr><td>Tracing (opt.)</td><td>Langfuse</td><td>Extra <code>[langfuse]</code></td></tr>
+            <tr><td>Lint/test</td><td>ruff, pytest</td><td>Extra <code>[dev]</code></td></tr>
+            <tr><td>Playground</td><td>Streamlit + Postgres + psycopg</td><td>Extra <code>[playground]</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <h3 class="full-only">Estrutura de pastas</h3>
+      <div class="pre-block full-only">
+        <button type="button" class="copy-btn" data-copy="tree">Copiar</button>
+        <pre id="tree">txt2sql/                 # pacote (~5,9k LOC)
+  agent.py               # build_agent + ReAct legado
+  graph.py               # dual-path (padrão)
+  intent.py / artifacts.py / policy.py / guardrail.py
+  path_routing.py / shard_routing.py / query_routing.py
+  config.py / llm.py / prompts.py / middleware.py / tracing.py
+  db/                    # registry, schema, shard, multi_shard, duckdb, session_store
+examples/                # YAMLs + resolver de exemplo
+playground/              # compose Postgres + Streamlit
+tests/                   # pytest (~29 arquivos)
+docs/                    # produto; docs/superpowers/ = specs internas
+smoke_test.py / smoke_test_graph.py</pre>
+      </div>
+      <p class="full-only">
+        <strong>Convenções:</strong> docs e comentários em PT-BR; termos de indústria em inglês;
+        Conventional Commits; Ruff <code>line-length=100</code>, <code>target-version=py312</code>
+        (CONTRIBUTING.md, AGENTS.md).
+      </p>
+    </section>
+
+    <!-- 4 -->
+    <section class="body-section" id="arquitetura" data-topics="architecture">
+      <h2>4. Arquitetura geral</h2>
+      <p>
+        Padrão predominante: <strong>grafo de estado tipado (LangGraph)</strong> com middleware de política
+        e camadas de dados plugáveis. A app hospedeira é o boundary de I/O; a lib é o núcleo de decisão + execução SQL.
+      </p>
+      <figure class="diagram" aria-label="Diagrama de contexto">
+        <svg viewBox="0 0 720 340" xmlns="http://www.w3.org/2000/svg" role="img">
+          <title>Contexto: caller, build_agent, bancos, LLM, DuckDB</title>
+          <rect width="720" height="340" fill="transparent"/>
+          <rect x="20" y="130" width="120" height="56" rx="0" fill="#f5ece9" stroke="#a03b00" stroke-width="1.5"/>
+          <text x="80" y="155" text-anchor="middle" font-family="Plus Jakarta Sans,sans-serif" font-size="11" fill="#1e1b19">Caller / app</text>
+          <text x="80" y="172" text-anchor="middle" font-family="Plus Jakarta Sans,sans-serif" font-size="10" fill="#594138">invoke/stream</text>
+          <path d="M140 158 H190" stroke="#594138" stroke-width="1.5" marker-end="url(#arrow)"/>
+          <rect x="190" y="120" width="150" height="76" fill="#fff8f6" stroke="#594138" stroke-width="1.5"/>
+          <text x="265" y="145" text-anchor="middle" font-family="Space Grotesk,sans-serif" font-size="12" font-weight="600" fill="#1e1b19">build_agent</text>
+          <text x="265" y="162" text-anchor="middle" font-family="Plus Jakarta Sans,sans-serif" font-size="10" fill="#594138">load_config(YAML)</text>
+          <text x="265" y="178" text-anchor="middle" font-family="Plus Jakarta Sans,sans-serif" font-size="10" fill="#594138">CompiledStateGraph</text>
+          <path d="M340 158 H390" stroke="#594138" stroke-width="1.5" marker-end="url(#arrow)"/>
+          <rect x="390" y="40" width="200" height="260" fill="#fbf2ef" stroke="#7b40e0" stroke-width="1.5"/>
+          <text x="490" y="65" text-anchor="middle" font-family="Space Grotesk,sans-serif" font-size="12" font-weight="600" fill="#1e1b19">Grafo dual-path</text>
+          <text x="490" y="95" text-anchor="middle" font-family="Plus Jakarta Sans,sans-serif" font-size="10" fill="#594138">interpret_intent</text>
+          <text x="490" y="115" text-anchor="middle" font-family="Plus Jakarta Sans,sans-serif" font-size="10" fill="#594138">resolve_and_route</text>
+          <text x="490" y="145" text-anchor="middle" font-family="Plus Jakarta Sans,sans-serif" font-size="10" fill="#a03b00">simple → origem</text>
+          <text x="490" y="165" text-anchor="middle" font-family="Plus Jakarta Sans,sans-serif" font-size="10" fill="#7b40e0">analytical → DuckDB</text>
+          <text x="490" y="195" text-anchor="middle" font-family="Plus Jakarta Sans,sans-serif" font-size="10" fill="#594138">Policy Gate</text>
+          <text x="490" y="215" text-anchor="middle" font-family="Plus Jakarta Sans,sans-serif" font-size="10" fill="#594138">verify → answer</text>
+          <text x="490" y="250" text-anchor="middle" font-family="Plus Jakarta Sans,sans-serif" font-size="10" fill="#8d7166">HITL clarificação</text>
+          <text x="490" y="270" text-anchor="middle" font-family="Plus Jakarta Sans,sans-serif" font-size="10" fill="#8d7166">(checkpointer)</text>
+          <path d="M590 100 H640" stroke="#594138" stroke-width="1.5" marker-end="url(#arrow)"/>
+          <rect x="640" y="78" width="60" height="44" fill="#fff8f6" stroke="#3b82f6"/>
+          <text x="670" y="105" text-anchor="middle" font-family="Plus Jakarta Sans,sans-serif" font-size="9" fill="#1e1b19">LLM</text>
+          <path d="M590 200 H640" stroke="#594138" stroke-width="1.5" marker-end="url(#arrow)"/>
+          <rect x="640" y="178" width="60" height="44" fill="#fff8f6" stroke="#10b981"/>
+          <text x="670" y="205" text-anchor="middle" font-family="Plus Jakarta Sans,sans-serif" font-size="9" fill="#1e1b19">DBs</text>
+          <path d="M490 300 V320 H670 V222" stroke="#594138" stroke-width="1.2" fill="none" stroke-dasharray="4 3"/>
+          <text x="580" y="335" text-anchor="middle" font-family="Plus Jakarta Sans,sans-serif" font-size="9" fill="#8d7166">DuckDBSessionStore (thread_id)</text>
+          <defs>
+            <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+              <path d="M0,0 L6,3 L0,6 Z" fill="#594138"/>
+            </marker>
+          </defs>
+        </svg>
+        <figcaption>Fig. 1 — Contexto runtime (síntese de docs/arquitetura.md). Dual-path é o padrão; ReAct é opt-in.</figcaption>
+      </figure>
+      <div class="claim-card">
+        <h4>API pública estável</h4>
+        <p>
+          Exportada em <code>txt2sql/__init__.py</code>:
+          <code>build_agent</code>, <code>load_config</code>, <code>AgentConfig</code>,
+          <code>ShardResult</code>, <code>QueryTimeoutError</code> (+ <code>__version__</code>).
+          Módulos internos (guardrail, policy, intent, db.*) são úteis mas sem garantia de estabilidade (api.md).
+        </p>
+      </div>
+    </section>
+
+    <!-- 5 -->
+    <section class="body-section" id="fluxo" data-topics="flow">
+      <h2>5. Fluxo de execução dual-path</h2>
+      <p>
+        Após <code>build_agent(config, checkpointer=..., dual_path=True)</code>, o caller invoca o grafo
+        com <code>HumanMessage</code> e, tipicamente, <code>configurable.thread_id</code>.
+      </p>
+      <ol class="flow-steps">
+        <li><strong>init_state</strong> — prepara <code>Budget</code> e reusa sessão DuckDB do <code>thread_id</code> se existir.</li>
+        <li><strong>interpret_intent</strong> — LLM → <code>IntentPlan</code>; <code>validate_intent</code> contra índice de colunas.</li>
+        <li><strong>ask_clarification</strong> (condicional) — HITL via <code>interrupt</code> se houver checkpointer; senão pergunta e encerra.</li>
+        <li><strong>resolve_and_route</strong> — <code>resolve_routing</code> + <code>route_execution</code> → <em>simple</em> ou <em>analytical</em>.</li>
+        <li><strong>Simple:</strong> <code>generate_sql</code> → Policy Gate → <code>exec_source</code> → <code>verify</code> → <code>answer</code>.</li>
+        <li><strong>Analytical:</strong> <code>sufficiency_gate</code> → plano/materialize → SQL DuckDB → <code>verify</code> → <code>answer</code>.</li>
+        <li><strong>verify</strong> pode refinar (volta a generate_*) ou materializar de novo, sujeitos a budgets.</li>
+      </ol>
+      <figure class="diagram full-only" aria-label="Fluxograma dual-path">
+        <svg viewBox="0 0 680 420" xmlns="http://www.w3.org/2000/svg" role="img">
+          <title>Nós e arestas dual-path</title>
+          <defs>
+            <marker id="a2" markerWidth="7" markerHeight="7" refX="5" refY="3" orient="auto"><path d="M0,0 L5,3 L0,6 Z" fill="#594138"/></marker>
+          </defs>
+          <rect x="250" y="10" width="180" height="36" fill="#f5ece9" stroke="#594138"/><text x="340" y="33" text-anchor="middle" font-size="11" font-family="sans-serif" fill="#1e1b19">init_state</text>
+          <line x1="340" y1="46" x2="340" y2="70" stroke="#594138" marker-end="url(#a2)"/>
+          <rect x="230" y="70" width="220" height="36" fill="#ffdbcd" stroke="#a03b00"/><text x="340" y="93" text-anchor="middle" font-size="11" font-family="sans-serif" fill="#1e1b19">interpret_intent</text>
+          <line x1="230" y1="88" x2="100" y2="88" stroke="#594138"/><line x1="100" y1="88" x2="100" y2="130" stroke="#594138" marker-end="url(#a2)"/>
+          <rect x="30" y="130" width="140" height="36" fill="#fbf2ef" stroke="#f59e0b"/><text x="100" y="153" text-anchor="middle" font-size="10" font-family="sans-serif" fill="#1e1b19">ask_clarification</text>
+          <line x1="340" y1="106" x2="340" y2="140" stroke="#594138" marker-end="url(#a2)"/>
+          <rect x="230" y="140" width="220" height="36" fill="#d5baff" stroke="#7b40e0"/><text x="340" y="163" text-anchor="middle" font-size="11" font-family="sans-serif" fill="#1e1b19">resolve_and_route</text>
+          <!-- simple branch -->
+          <line x1="230" y1="158" x2="80" y2="210" stroke="#a03b00" marker-end="url(#a2)"/>
+          <text x="120" y="195" font-size="10" fill="#a03b00" font-family="sans-serif">simple</text>
+          <rect x="20" y="210" width="120" height="28" fill="#fff8f6" stroke="#a03b00"/><text x="80" y="229" text-anchor="middle" font-size="10" font-family="sans-serif" fill="#1e1b19">generate_sql</text>
+          <line x1="80" y1="238" x2="80" y2="258" stroke="#594138" marker-end="url(#a2)"/>
+          <rect x="20" y="258" width="120" height="28" fill="#fff8f6" stroke="#a03b00"/><text x="80" y="277" text-anchor="middle" font-size="10" font-family="sans-serif" fill="#1e1b19">exec_source</text>
+          <!-- analytical -->
+          <line x1="450" y1="158" x2="560" y2="210" stroke="#7b40e0" marker-end="url(#a2)"/>
+          <text x="520" y="195" font-size="10" fill="#7b40e0" font-family="sans-serif">analytical</text>
+          <rect x="500" y="210" width="150" height="28" fill="#fff8f6" stroke="#7b40e0"/><text x="575" y="229" text-anchor="middle" font-size="10" font-family="sans-serif" fill="#1e1b19">sufficiency_gate</text>
+          <line x1="575" y1="238" x2="575" y2="258" stroke="#594138" marker-end="url(#a2)"/>
+          <rect x="500" y="258" width="150" height="28" fill="#fff8f6" stroke="#7b40e0"/><text x="575" y="277" text-anchor="middle" font-size="10" font-family="sans-serif" fill="#1e1b19">materialize…</text>
+          <line x1="575" y1="286" x2="575" y2="306" stroke="#594138" marker-end="url(#a2)"/>
+          <rect x="500" y="306" width="150" height="28" fill="#fff8f6" stroke="#7b40e0"/><text x="575" y="325" text-anchor="middle" font-size="10" font-family="sans-serif" fill="#1e1b19">exec_duckdb</text>
+          <!-- converge verify -->
+          <line x1="140" y1="272" x2="280" y2="360" stroke="#594138" marker-end="url(#a2)"/>
+          <line x1="500" y1="320" x2="400" y2="360" stroke="#594138" marker-end="url(#a2)"/>
+          <rect x="280" y="360" width="120" height="28" fill="#ffdbcd" stroke="#a03b00"/><text x="340" y="379" text-anchor="middle" font-size="11" font-family="sans-serif" fill="#1e1b19">verify → answer</text>
+        </svg>
+        <figcaption>Fig. 2 — Fluxo dual-path (nós principais; arestas condicionais de retry/HITL omitidas por clareza).</figcaption>
+      </figure>
+      <h3>Critérios simple vs analytical</h3>
+      <p>
+        Evidência em <code>path_routing.route_execution</code>:
+      </p>
+      <ul>
+        <li><code>shard_routing.mode == "multi"</code> → analytical</li>
+        <li>Tabela com <code>force_analytical</code> / <code>requires_analytical</code> → analytical</li>
+        <li>Tabela DuckDB + métrica agregada ≠ <code>none</code> ou <code>group_by</code> → analytical</li>
+        <li>Caso contrário → simple</li>
+      </ul>
+      <aside class="caveat-box">
+        <strong>Incerteza / possível divergência:</strong> triggers DuckDB <code>order</code> e <code>join</code>
+        são honrados por <code>needs_duckdb</code> no caminho ReAct; <code>route_execution</code> (dual-path)
+        não os lista explicitamente — comportamento pode diferir entre os dois grafos.
+      </aside>
+      <h3 class="full-only">ReAct legado (<code>dual_path=False</code>)</h3>
+      <p class="full-only">
+        Loop em <code>agent.py</code>: após intent, o LLM chama tools
+        (<code>sql_db_schema</code>, <code>sql_db_query</code>, opcionalmente <code>resolve_shard</code>,
+        <code>materialize_sharded_table</code>). DuckDB é sessão in-memory <em>por turno</em>,
+        não <code>DuckDBSessionStore</code>.
+      </p>
+    </section>
+
+    <!-- 6 -->
+    <section class="body-section" id="componentes" data-topics="modules">
+      <h2>6. Componentes e responsabilidades</h2>
+      <div class="module-grid">
+        <div class="module-card"><h4>agent.py</h4><p>Entrypoint <code>build_agent</code>; delega dual-path ou monta ReAct.</p></div>
+        <div class="module-card"><h4>graph.py</h4><p>Grafo dual-path: nós, budgets, HITL, verify/answer (~1205 LOC).</p></div>
+        <div class="module-card"><h4>intent.py</h4><p><code>IntentPlan</code> + <code>validate_intent</code> fail-closed.</p></div>
+        <div class="module-card"><h4>artifacts.py</h4><p><code>SQLPlan</code>, <code>Budget</code>, <code>DuckDBCatalog</code>, decisões tipadas.</p></div>
+        <div class="module-card"><h4>shard_routing.py</h4><p><code>resolve_routing</code> a partir do IntentPlan.</p></div>
+        <div class="module-card"><h4>path_routing.py</h4><p><code>route_execution</code> → simple | analytical.</p></div>
+        <div class="module-card"><h4>query_routing.py</h4><p>Análise de refs de tabela; rejeição cross-DB / shard.</p></div>
+        <div class="module-card"><h4>policy.py</h4><p>Policy Gate composto pré-execução.</p></div>
+        <div class="module-card"><h4>guardrail.py</h4><p><code>validate_sql</code> AST sqlglot fail-closed.</p></div>
+        <div class="module-card"><h4>config.py</h4><p>Dataclasses + <code>load_config</code>.</p></div>
+        <div class="module-card"><h4>middleware.py</h4><p>Compactação de resultados / factories de erro.</p></div>
+        <div class="module-card"><h4>prompts.py / llm.py</h4><p>System prompts + AzureChatOpenAI.</p></div>
+        <div class="module-card"><h4>tracing.py</h4><p>Langfuse opcional.</p></div>
+        <div class="module-card"><h4>db/registry.py</h4><p>Engines + execute + timeout.</p></div>
+        <div class="module-card"><h4>db/schema.py</h4><p>Declarativo vs discovery.</p></div>
+        <div class="module-card"><h4>db/shard.py</h4><p>Resolver + tool ReAct <code>resolve_shard</code>.</p></div>
+        <div class="module-card"><h4>db/multi_shard.py</h4><p>Fan-in multi-discriminador no DuckDB.</p></div>
+        <div class="module-card"><h4>db/duckdb_layer.py</h4><p><code>DuckDBSession</code>, materialize em lotes (BATCH_SIZE=5000).</p></div>
+        <div class="module-card"><h4>db/session_store.py</h4><p>Arquivos <code>{thread_id}.duckdb</code>.</p></div>
+      </div>
+      <figure class="diagram full-only" aria-label="Dependências entre módulos">
+        <svg viewBox="0 0 700 260" xmlns="http://www.w3.org/2000/svg" role="img">
+          <title>Dependências lógicas entre módulos</title>
+          <rect x="20" y="100" width="90" height="40" fill="#ffdbcd" stroke="#a03b00"/><text x="65" y="125" text-anchor="middle" font-size="11" font-family="sans-serif" fill="#1e1b19">agent</text>
+          <rect x="140" y="40" width="90" height="40" fill="#d5baff" stroke="#7b40e0"/><text x="185" y="65" text-anchor="middle" font-size="11" font-family="sans-serif" fill="#1e1b19">graph</text>
+          <rect x="140" y="160" width="90" height="40" fill="#f5ece9" stroke="#594138"/><text x="185" y="185" text-anchor="middle" font-size="10" font-family="sans-serif" fill="#1e1b19">ReAct tools</text>
+          <rect x="270" y="20" width="80" height="36" fill="#fff8f6" stroke="#594138"/><text x="310" y="43" text-anchor="middle" font-size="10" font-family="sans-serif" fill="#1e1b19">intent</text>
+          <rect x="270" y="70" width="80" height="36" fill="#fff8f6" stroke="#594138"/><text x="310" y="93" text-anchor="middle" font-size="10" font-family="sans-serif" fill="#1e1b19">routing*</text>
+          <rect x="270" y="120" width="80" height="36" fill="#fff8f6" stroke="#594138"/><text x="310" y="143" text-anchor="middle" font-size="10" font-family="sans-serif" fill="#1e1b19">policy</text>
+          <rect x="390" y="120" width="90" height="36" fill="#fff8f6" stroke="#ef4444"/><text x="435" y="143" text-anchor="middle" font-size="10" font-family="sans-serif" fill="#1e1b19">guardrail</text>
+          <rect x="520" y="40" width="150" height="160" fill="#fbf2ef" stroke="#10b981"/>
+          <text x="595" y="70" text-anchor="middle" font-size="11" font-family="sans-serif" font-weight="600" fill="#1e1b19">db/</text>
+          <text x="595" y="95" text-anchor="middle" font-size="10" font-family="sans-serif" fill="#594138">registry · schema</text>
+          <text x="595" y="115" text-anchor="middle" font-size="10" font-family="sans-serif" fill="#594138">shard · multi_shard</text>
+          <text x="595" y="135" text-anchor="middle" font-size="10" font-family="sans-serif" fill="#594138">duckdb_layer</text>
+          <text x="595" y="155" text-anchor="middle" font-size="10" font-family="sans-serif" fill="#594138">session_store</text>
+          <text x="595" y="180" text-anchor="middle" font-size="9" font-family="sans-serif" fill="#8d7166">→ SQL engines / DuckDB</text>
+          <line x1="110" y1="120" x2="140" y2="60" stroke="#594138"/><line x1="110" y1="120" x2="140" y2="180" stroke="#594138"/>
+          <line x1="230" y1="60" x2="270" y2="38" stroke="#594138"/><line x1="230" y1="60" x2="270" y2="88" stroke="#594138"/>
+          <line x1="230" y1="60" x2="270" y2="138" stroke="#594138"/>
+          <line x1="350" y1="138" x2="390" y2="138" stroke="#594138"/>
+          <line x1="480" y1="138" x2="520" y2="120" stroke="#594138"/>
+          <line x1="350" y1="88" x2="520" y2="80" stroke="#594138"/>
+        </svg>
+        <figcaption>Fig. 3 — Dependências lógicas (não é grafo de imports literal). routing* = path/shard/query_routing.</figcaption>
+      </figure>
+    </section>
+
+    <!-- 7 -->
+    <section class="body-section" id="seguranca" data-topics="safety">
+      <h2>7. Intent, Policy Gate e Guardrail</h2>
+      <h3>IntentPlan</h3>
+      <p>
+        Structured output com <code>status</code> (<code>ready</code> | <code>needs_clarification</code>),
+        rewrite da pergunta, entities, filters, metrics, group_by, joins, order_by, limit,
+        clarification e assumptions. Validação fail-closed de IDs de tabela/coluna contra
+        <code>SchemaLoader.get_column_index</code>.
+      </p>
+      <h3>Policy Gate (<code>check_sql_plan</code>)</h3>
+      <ol>
+        <li>Chama <code>validate_sql</code> + allowlist de tabelas</li>
+        <li>Rejeita nomes físicos já materializados (usar nome lógico no DuckDB)</li>
+        <li><code>routing_rejection_reason</code> (shard não resolvido / cross-DB)</li>
+        <li>Em <code>source_extract</code>: bloqueia agregação na origem se <code>force_analytical</code></li>
+        <li>Injeta <code>LIMIT</code> se ausente (default 500 000)</li>
+      </ol>
+      <h3>Guardrail (<code>validate_sql</code>)</h3>
+      <p>
+        Fail-closed: query vazia, denylist textual (fora de literais/comentários), exatamente 1 statement,
+        raiz Select/With/Union, proíbe DML/DDL/controle em qualquer profundidade da AST,
+        funções com side-effect, allowlist opcional pós-<code>qualify</code>.
+        Complementado por listener no <code>DatabaseRegistry</code> quando <code>read_only</code>.
+      </p>
+      <div class="claim-card">
+        <h4>Princípio de segurança</h4>
+        <p>Qualquer dúvida → rejeitar (AGENTS.md, ADR-0004). Não há modo “best effort” no gate.</p>
+      </div>
+    </section>
+
+    <!-- 8 -->
+    <section class="body-section" id="dados" data-topics="data">
+      <h2>8. Camada de dados</h2>
+      <div class="fact-table">
+        <table>
+          <thead><tr><th>Componente</th><th>Comportamento chave</th></tr></thead>
+          <tbody>
+            <tr><td>DatabaseRegistry</td><td>Engine + inspection engine; execute com <code>query_timeout</code> → <code>QueryTimeoutError</code></td></tr>
+            <tr><td>SchemaLoader</td><td>Com <code>columns</code> no YAML → declarativo; sem → <code>inspect()</code> + amostras</td></tr>
+            <tr><td>ShardResolver</td><td>Callable dotted <code>modulo:func</code> → <code>ShardResult</code>; tool no ReAct</td></tr>
+            <tr><td>multi_shard</td><td>≥2 discriminadores; corta em <code>max_shard_discriminators</code>; fan-in DuckDB</td></tr>
+            <tr><td>DuckDBSession</td><td><code>materialize</code> em lotes; sem <code>fetchall</code> na origem</td></tr>
+            <tr><td>DuckDBSessionStore</td><td>File-backed por <code>thread_id</code> (dual-path)</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="full-only">
+        IDs de tabela no YAML são <strong>lógicos</strong>; nomes físicos podem diferir após shard.
+        Dialetos evidenciados nos exemplos: <code>postgres</code>, <code>tsql</code> (YAML <code>dialect</code>).
+      </p>
+    </section>
+
+    <!-- 9 -->
+    <section class="body-section" id="config" data-topics="config">
+      <h2>9. Configuração YAML</h2>
+      <p>
+        <code>load_config(path, override_connections=None)</code> produz <code>AgentConfig</code>.
+        Connection strings vêm de <code>connection_env</code> (ex.: <code>MAIN_DB_URL</code>), não de nomes fixos —
+        ou de <code>override_connections</code> em runtime.
+      </p>
+      <div class="pre-block">
+        <button type="button" class="copy-btn" data-copy="yaml-shape">Copiar</button>
+        <pre id="yaml-shape">dialect: postgres|tsql
+databases: [{id, connection_env|connection_string, read_only, query_timeout?}]
+tables: [{id, database, name, columns?, sharding?, duckdb?, description?}]
+relationships: [{from: {table, column}, to: {...}}]
+glossary: [{term, definition}]
+agent: {top_k, max_pages, max_shard_discriminators, query_timeout, ...}
+llm: {deployment, model, api_version, azure_endpoint, api_key, temperature}
+# DuckDBConfig: enabled, trigger∈{always,aggregation,order,join}, fetch_limit, force_analytical
+# sharding.resolver: "modulo.sub:funcao" → (str) -> ShardResult</pre>
+      </div>
+      <p class="full-only">
+        Se o bloco <code>llm</code> estiver incompleto, <code>AZURE_OPENAI_*</code> são obrigatórias (AGENTS.md).
+        <code>trigger: always</code> implica <code>force_analytical=True</code>.
+      </p>
+    </section>
+
+    <!-- 10 -->
+    <section class="body-section" id="adrs" data-topics="adr">
+      <h2>10. Decisões arquiteturais (ADRs)</h2>
+      <div class="fact-table">
+        <table>
+          <thead><tr><th>ADR</th><th>Decisão</th><th>Consequência principal</th></tr></thead>
+          <tbody>
+            <tr><td>0001</td><td>Lib standalone + LangGraph (sem FastAPI embutido)</td><td>Caller monta checkpointer/transporte</td></tr>
+            <tr><td>0002</td><td>Sharding determinístico; fan-out proibido</td><td>Dual-path: <code>resolve_routing</code>; multi → fan-in DuckDB</td></tr>
+            <tr><td>0003</td><td>DuckDB intermediário com triggers e lotes</td><td>Dual-path: sessão por thread_id; ReAct: efêmero</td></tr>
+            <tr><td>0004</td><td>Guardrail sqlglot fail-closed</td><td>AST + denylist + listener engine</td></tr>
+            <tr><td>0005</td><td>Schema híbrido declarativo/discovery</td><td>Colunas no YAML opt-in</td></tr>
+            <tr><td>0006</td><td>Dual-path como padrão</td><td>ReAct via <code>dual_path=False</code>; Policy Gate + budgets</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="full-only">Status: todos <code>accepted</code> nos frontmatters lidos. Template em <code>docs/adr/template.md</code>.</p>
+    </section>
+
+    <!-- 11 -->
+    <section class="body-section" id="glossario" data-topics="glossary">
+      <h2>11. Glossário</h2>
+      <dl class="def-list">
+        <dt>Shard / discriminator</dt>
+        <dd>Partição física determinada por um valor (ex. CNPJ) via resolver → <code>ShardResult(database_id, table_name)</code>.</dd>
+        <dt>Fan-out / Fan-in</dt>
+        <dd>Fan-out = varrer todos os shards (proibido). Fan-in = materializar ≥2 discriminadores no DuckDB sob nome lógico.</dd>
+        <dt>IntentPlan</dt>
+        <dd>Plano semântico pré-SQL (structured output), validado antes do roteamento.</dd>
+        <dt>HITL</dt>
+        <dd>Human-in-the-loop: clarificação via <code>interrupt</code> + <code>Command(resume=...)</code> com checkpointer.</dd>
+        <dt>thread_id</dt>
+        <dd>Chave LangGraph de sessão e chave do <code>DuckDBSessionStore</code>.</dd>
+        <dt>dual_path / simple / analytical</dt>
+        <dd>Dois caminhos de execução no grafo padrão; ReAct é o modo legado.</dd>
+        <dt>force_analytical</dt>
+        <dd>Obriga path analítico; Policy Gate bloqueia agregação na origem.</dd>
+        <dt>Budget</dt>
+        <dd>Orçamentos de clarificações, refines, loops de materialização e visitas ao gate.</dd>
+        <dt>sufficiency_gate</dt>
+        <dd>Decide reuse vs refresh do catálogo DuckDB da sessão.</dd>
+        <dt>Tabela lógica vs física</dt>
+        <dd>ID/nome no YAML vs nome real no shard após resolução.</dd>
+        <dt>fail-closed</dt>
+        <dd>Em dúvida (parse, política, intent), rejeitar em vez de executar.</dd>
+      </dl>
+    </section>
+
+    <!-- 12 -->
+    <section class="body-section" id="restricoes" data-topics="constraints">
+      <h2>12. Premissas, restrições e requisitos</h2>
+      <ul>
+        <li>Checkpointer <strong>não</strong> é criado pela lib — HITL/resume exige injeção pelo caller.</li>
+        <li>Clarificações limitadas por <code>Budget.max_clarifications</code> (default 2); esgotado → finish sem SQL.</li>
+        <li>Queries de escrita rejeitadas; default <code>read_only=True</code>.</li>
+        <li>Sem fan-out; multi-discriminador só via materialização DuckDB.</li>
+        <li>Python ≥ 3.12; Azure OpenAI para uso real (smokes usam LLM falso / SQLite).</li>
+        <li>Materialize em lotes — não usar <code>fetchall</code> na origem (AGENTS.md).</li>
+        <li>API pública só muda com atualização de <code>docs/referencia/api.md</code> (CONTRIBUTING).</li>
+      </ul>
+      <h3 class="full-only">Requisitos importantes (produto)</h3>
+      <ul class="full-only">
+        <li>Grounding de intent antes de SQL</li>
+        <li>Proteção de OLTP-hot (<code>force_analytical</code>, Policy Gate)</li>
+        <li>Observabilidade opcional (Langfuse)</li>
+        <li>Config declarativa multi-tenant-friendly via YAML + overrides</li>
+      </ul>
+    </section>
+
+    <!-- 13 -->
+    <section class="body-section" id="gaps" data-topics="gaps">
+      <h2>13. Divergências e lacunas docs ↔ código</h2>
+      <div class="claim-card">
+        <h4><span class="tag gap">gap</span> smoke_test_graph vs ADR-0006</h4>
+        <p>
+          ADR-0006 afirma que <code>smoke_test_graph.py</code> “cobre o caminho compilado” dual-path;
+          o smoke usa <code>dual_path=False</code> (ReAct). Evidência cruzada: relatório de exploração do código.
+        </p>
+      </div>
+      <div class="claim-card">
+        <h4><span class="tag gap">gap</span> custom_section de recebiveis.yaml</h4>
+        <p>
+          Instrui o LLM a usar tools <code>resolve_shard</code> / <code>materialize_sharded_table</code>,
+          inexistentes no dual-path padrão — texto alinhado ao ReAct legado.
+        </p>
+      </div>
+      <div class="claim-card">
+        <h4><span class="tag warn">doc</span> duckdb_layer docstring</h4>
+        <p>
+          Ainda descreve sessão “efêmera por turno”; dual-path usa store persistente por <code>thread_id</code>
+          (ADR-0003 / api.md).
+        </p>
+      </div>
+      <div class="claim-card">
+        <h4><span class="tag warn">doc</span> AGENTS.md Structure</h4>
+        <p>
+          Omite vários módulos (<code>artifacts</code>, routings, <code>middleware</code>, <code>llm</code>, …)
+          e a API listada omitia <code>QueryTimeoutError</code> (presente no código e em api.md).
+        </p>
+      </div>
+      <div class="claim-card">
+        <h4><span class="tag warn">comportamento</span> triggers order/join</h4>
+        <p>
+          Possível divergência entre <code>needs_duckdb</code> (ReAct) e <code>route_execution</code> (dual-path)
+          quanto a triggers <code>order</code>/<code>join</code> — não determinado com certeza de equivalência.
+        </p>
+      </div>
+      <aside class="caveat-box">
+        <strong>Não determinado com confiança:</strong> métricas de uso em produção, SLAs,
+        topologia real de shards fora dos exemplos, e o papel runtime concreto de <code>grandalf</code>
+        (declarado em pyproject; não documentado na doc de produto lida).
+      </aside>
+    </section>
+
+    <!-- 14 -->
+    <section class="body-section" id="fontes" data-topics="sources">
+      <h2>14. Fontes consultadas</h2>
+      <div class="source-spread evidence-browser">
+        <details open>
+          <summary>Documentação de produto</summary>
+          <div class="src-body">
+            README.md · AGENTS.md · CONTRIBUTING.md · docs/arquitetura.md · docs/primeiros-passos.md ·
+            docs/referencia/api.md · docs/adr/0001–0006 · guias (referenciados)
+          </div>
+        </details>
+        <details>
+          <summary>Código-fonte principal</summary>
+          <div class="src-body">
+            txt2sql/__init__.py · agent.py · graph.py · intent.py · artifacts.py · policy.py · guardrail.py ·
+            path_routing.py · shard_routing.py · query_routing.py · config.py · db/* · pyproject.toml
+          </div>
+        </details>
+        <details>
+          <summary>Exemplos e harness</summary>
+          <div class="src-body">
+            examples/recebiveis.yaml · examples/shard_resolver_example.py · playground/ ·
+            smoke_test.py · smoke_test_graph.py · tests/
+          </div>
+        </details>
+        <details>
+          <summary>Fora do escopo de produto (não usados como contrato)</summary>
+          <div class="src-body">
+            docs/superpowers/ (specs e plans de features) — AGENTS.md: “não é doc de produto”.
+          </div>
+        </details>
+      </div>
+
+      <div class="question-panel">
+        <h2>Checklist de revisão / próximos passos</h2>
+        <ul>
+          <li>Alinhar <code>smoke_test_graph.py</code> ao dual-path ou corrigir ADR-0006.</li>
+          <li>Atualizar <code>custom_section</code> de exemplos para o path padrão (sem tools de shard).</li>
+          <li>Sincronizar docstring de <code>duckdb_layer</code> e árvore do AGENTS.md.</li>
+          <li>Confirmar equivalência de triggers DuckDB entre ReAct e <code>route_execution</code>.</li>
+          <li>Ler guias operacionais (runbook, deploy, troubleshooting) se for operar o playground/produção.</li>
+        </ul>
+      </div>
+    </section>
+
+  </main>
+
+  <aside class="evidence-margin" aria-label="Margem de evidências">
+    <h2>Evidências</h2>
+    <div class="evidence-card" data-for="resumo">
+      <div class="src">README.md § Visão Geral</div>
+      <p>Lib standalone Text-to-SQL: multi-banco, sharding, DuckDB — sem FastAPI embutido.</p>
+    </div>
+    <div class="evidence-card" data-for="arquitetura">
+      <div class="src">docs/arquitetura.md</div>
+      <p>Mermaid oficial: Caller → build_agent → dual-path → Policy Gate → Registry / DuckDBStore.</p>
+    </div>
+    <div class="evidence-card" data-for="fluxo">
+      <div class="src">txt2sql/graph.py · path_routing.py</div>
+      <p>Nós simple/analytical; route_execution: multi | force_analytical | agg/group_by.</p>
+    </div>
+    <div class="evidence-card" data-for="seguranca">
+      <div class="src">guardrail.py · policy.py · ADR-0004</div>
+      <p>AST fail-closed + Policy Gate composto + listener read-only.</p>
+    </div>
+    <div class="evidence-card" data-for="adrs">
+      <div class="src">docs/adr/0001–0006</div>
+      <p>Seis ADRs accepted: standalone, shard, DuckDB, guardrail, schema, dual-path.</p>
+    </div>
+    <div class="evidence-card" data-for="gaps">
+      <div class="src">ADR-0006 Confirmation vs smoke_test_graph.py</div>
+      <p>Doc diz dual-path; smoke usa dual_path=False.</p>
+    </div>
+    <div class="evidence-card">
+      <div class="src">txt2sql/__init__.py</div>
+      <p>API: build_agent, load_config, AgentConfig, ShardResult, QueryTimeoutError.</p>
+    </div>
+    <div class="evidence-card">
+      <div class="src">pyproject.toml</div>
+      <p>v0.1.0 · MIT · deps LangGraph/SQLAlchemy/sqlglot/DuckDB · extras langfuse/dev/playground.</p>
+    </div>
+  </aside>
+</div>
+
+<button type="button" class="mobile-toggle" id="toggle-evidence" aria-label="Abrir evidências">≡</button>
+
+</div>
+<script>
+(function () {
+  const root = document.documentElement;
+  const modeBtns = document.querySelectorAll('.mode-btn');
+  modeBtns.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const mode = btn.getAttribute('data-mode');
+      root.setAttribute('data-mode', mode === 'full' ? '' : mode);
+      if (mode === 'full') root.removeAttribute('data-mode');
+      else root.setAttribute('data-mode', mode);
+      modeBtns.forEach((b) => b.setAttribute('aria-pressed', String(b === btn)));
+    });
+  });
+
+  const links = document.querySelectorAll('.nav-link');
+  const sections = [...document.querySelectorAll('.body-section')];
+  const io = new IntersectionObserver((entries) => {
+    entries.forEach((e) => {
+      if (!e.isIntersecting) return;
+      const id = e.target.id;
+      links.forEach((a) => a.classList.toggle('is-active', a.getAttribute('href') === '#' + id));
+    });
+  }, { rootMargin: '-20% 0px -60% 0px', threshold: 0 });
+  sections.forEach((s) => io.observe(s));
+
+  document.querySelectorAll('.copy-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const id = btn.getAttribute('data-copy');
+      const el = document.getElementById(id);
+      if (!el) return;
+      try {
+        await navigator.clipboard.writeText(el.textContent);
+        btn.textContent = 'Copiado';
+        setTimeout(() => { btn.textContent = 'Copiar'; }, 1500);
+      } catch (_) {
+        btn.textContent = 'Falhou';
+      }
+    });
+  });
+
+  const search = document.getElementById('doc-search');
+  search.addEventListener('input', () => {
+    const q = search.value.trim().toLowerCase();
+    document.querySelectorAll('.mark').forEach((m) => {
+      const t = m.textContent;
+      m.replaceWith(document.createTextNode(t));
+    });
+    if (!q) return;
+    sections.forEach((sec) => {
+      const walker = document.createTreeWalker(sec, NodeFilter.SHOW_TEXT, null);
+      const nodes = [];
+      while (walker.nextNode()) nodes.push(walker.currentNode);
+      nodes.forEach((node) => {
+        const text = node.nodeValue;
+        const idx = text.toLowerCase().indexOf(q);
+        if (idx < 0 || !text.trim()) return;
+        const range = document.createRange();
+        range.setStart(node, idx);
+        range.setEnd(node, idx + q.length);
+        const mark = document.createElement('mark');
+        mark.className = 'mark';
+        range.surroundContents(mark);
+      });
+    });
+  });
+
+  const workspace = document.getElementById('workspace');
+  document.getElementById('toggle-evidence').addEventListener('click', () => {
+    workspace.classList.toggle('show-evidence');
+  });
+})();
+</script>
+</body>
+</html>
