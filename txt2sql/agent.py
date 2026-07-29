@@ -196,7 +196,7 @@ def build_agent(
     shard_resolver = ShardResolver(config, registry) if config.sharded_tables else None
     prompt_builder = Txt2SqlPromptBuilder(config)
     system_prompt = prompt_builder.build()
-    intent_prompt = prompt_builder.build_intent_prompt()
+    intent_prompt = prompt_builder.build_intent_prompt(schema_loader=schema_loader)
     has_checkpointer = checkpointer is not None
 
     llm = build_llm(config)

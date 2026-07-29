@@ -55,6 +55,10 @@ from txt2sql.query_routing import extract_table_names
 from txt2sql.shard_routing import ClarifyNeeded, resolve_routing
 
 MAX_INTENT_RETRIES = 2
+CLARIFICATION_EXHAUSTED = (
+    "Não consegui obter esclarecimentos suficientes para continuar. "
+    "Reformule a pergunta com todos os detalhes necessários numa única mensagem."
+)
 
 
 class GateDecision(BaseModel):
@@ -372,7 +376,7 @@ def build_graph(
     registry = DatabaseRegistry(config)
     schema_loader = SchemaLoader(config, registry)
     prompt_builder = Txt2SqlPromptBuilder(config)
-    intent_prompt = prompt_builder.build_intent_prompt()
+    intent_prompt = prompt_builder.build_intent_prompt(schema_loader=schema_loader)
     has_checkpointer = checkpointer is not None
 
     if session_store is None:
@@ -405,7 +409,11 @@ def build_graph(
             catalog_dump = DuckDBCatalog().model_dump(by_alias=True)
 
         prev_budget = _budget(state)
-        budget = Budget(total_rows_materialized=prev_budget.total_rows_materialized)
+        budget = Budget(
+            total_rows_materialized=prev_budget.total_rows_materialized,
+            clarification_count=0,
+            max_clarifications=prev_budget.max_clarifications,
+        )
 
         return {
             "intent_plan": None,
@@ -463,6 +471,14 @@ def build_graph(
                         )
                     }
                 )
+            budget = _budget(state)
+            if budget.exhausted("clarification_count"):
+                return {
+                    "intent_plan": plan.model_dump(),
+                    "intent_route": "finish",
+                    "final_answer": CLARIFICATION_EXHAUSTED,
+                    "messages": [AIMessage(content=CLARIFICATION_EXHAUSTED)],
+                }
             return {
                 "intent_plan": plan.model_dump(),
                 "intent_route": "ask_clarification",
@@ -514,6 +530,18 @@ def build_graph(
         options = clarification.get("options") or []
         logger.info("ask_clarification: {}", question[:120])
 
+        budget = _budget(state)
+        if budget.exhausted("clarification_count"):
+            return {
+                "intent_route": "finish",
+                "final_answer": CLARIFICATION_EXHAUSTED,
+                "messages": [AIMessage(content=CLARIFICATION_EXHAUSTED)],
+            }
+
+        budget = budget.model_copy(
+            update={"clarification_count": budget.clarification_count + 1}
+        )
+
         if has_checkpointer:
             answer = interrupt(
                 {
@@ -522,12 +550,25 @@ def build_graph(
                     "options": options,
                 }
             )
-            return {"messages": [HumanMessage(content=str(answer))]}
+            return {
+                "messages": [HumanMessage(content=str(answer))],
+                "budget": budget.model_dump(),
+                "final_answer": None,
+            }
 
         text = question
         if options:
             text = question + "\nOpções: " + ", ".join(str(o) for o in options)
-        return {"messages": [AIMessage(content=text)]}
+        return {
+            "messages": [AIMessage(content=text)],
+            "budget": budget.model_dump(),
+            "final_answer": None,
+        }
+
+    def finish(state: GraphState) -> dict[str, Any]:
+        """Encerra com ``final_answer`` já definido (ex.: clarificação esgotada)."""
+        text = state.get("final_answer") or CLARIFICATION_EXHAUSTED
+        return {"final_answer": text, "messages": [AIMessage(content=text)]}
 
     def resolve_and_route(state: GraphState) -> dict[str, Any]:
         plan = _coerce_intent_plan(state.get("intent_plan"))
@@ -538,6 +579,14 @@ def build_graph(
                 question_rewrite=plan.question_rewrite,
                 clarification=Clarification(question=routing_result.question),
             )
+            budget = _budget(state)
+            if budget.exhausted("clarification_count"):
+                return {
+                    "intent_plan": clarify.model_dump(),
+                    "intent_route": "finish",
+                    "final_answer": CLARIFICATION_EXHAUSTED,
+                    "messages": [AIMessage(content=CLARIFICATION_EXHAUSTED)],
+                }
             return {
                 "intent_plan": clarify.model_dump(),
                 "intent_route": "ask_clarification",
@@ -1012,6 +1061,8 @@ def build_graph(
     # ------------------------------------------------------------------ #
     def route_after_intent(state: GraphState) -> str:
         route = state.get("intent_route") or "resolve_and_route"
+        if route == "finish":
+            return "finish"
         if route == "ask_clarification":
             return "ask_clarification"
         if route == "interpret_intent":
@@ -1021,8 +1072,15 @@ def build_graph(
     def route_after_resolve(state: GraphState) -> str:
         if state.get("intent_route") == "ask_clarification":
             return "ask_clarification"
+        if state.get("intent_route") == "finish":
+            return "finish"
         path = state.get("execution_path") or "simple"
         return "generate_sql" if path == "simple" else "sufficiency_gate"
+
+    def route_after_clarification(state: GraphState) -> str:
+        if state.get("intent_route") == "finish":
+            return "finish"
+        return "interpret_intent" if has_checkpointer else END
 
     def route_after_gate(state: GraphState) -> str:
         return (
@@ -1054,6 +1112,7 @@ def build_graph(
     graph.add_node("init_state", init_state)
     graph.add_node("interpret_intent", interpret_intent)
     graph.add_node("ask_clarification", ask_clarification)
+    graph.add_node("finish", finish)
     graph.add_node("resolve_and_route", resolve_and_route)
     graph.add_node("generate_sql", generate_sql)
     graph.add_node("exec_source", exec_source)
@@ -1071,16 +1130,18 @@ def build_graph(
     graph.add_conditional_edges(
         "interpret_intent",
         route_after_intent,
-        ["ask_clarification", "interpret_intent", "resolve_and_route"],
+        ["ask_clarification", "interpret_intent", "resolve_and_route", "finish"],
     )
-    if has_checkpointer:
-        graph.add_edge("ask_clarification", "interpret_intent")
-    else:
-        graph.add_edge("ask_clarification", END)
+    graph.add_conditional_edges(
+        "ask_clarification",
+        route_after_clarification,
+        ["finish", "interpret_intent", END],
+    )
+    graph.add_edge("finish", END)
     graph.add_conditional_edges(
         "resolve_and_route",
         route_after_resolve,
-        ["ask_clarification", "generate_sql", "sufficiency_gate"],
+        ["ask_clarification", "generate_sql", "sufficiency_gate", "finish"],
     )
     graph.add_edge("generate_sql", "exec_source")
     graph.add_edge("exec_source", "verify")

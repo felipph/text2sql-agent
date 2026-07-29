@@ -142,6 +142,7 @@ BudgetCounter = Literal[
     "mat_loop_count",
     "gate_visits",
     "total_rows_materialized",
+    "clarification_count",
 ]
 
 
@@ -154,6 +155,8 @@ class Budget(BaseModel):
     max_mat_loops: int = 3
     gate_visits: int = 0
     max_gate_visits: int = 2
+    clarification_count: int = 0
+    max_clarifications: int = 2
     total_rows_materialized: int = 0
     max_rows_materialized: int = 2_000_000
     max_rows_per_extract: int = 500_000
@@ -164,6 +167,7 @@ class Budget(BaseModel):
             "refine_count": ("refine_count", "max_refine"),
             "mat_loop_count": ("mat_loop_count", "max_mat_loops"),
             "gate_visits": ("gate_visits", "max_gate_visits"),
+            "clarification_count": ("clarification_count", "max_clarifications"),
             "total_rows_materialized": (
                 "total_rows_materialized",
                 "max_rows_materialized",

@@ -8,7 +8,12 @@ e uma seção customizável.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from txt2sql.config import AgentConfig
+
+if TYPE_CHECKING:
+    from txt2sql.db.schema import SchemaLoader
 
 
 class Txt2SqlPromptBuilder:
@@ -24,7 +29,7 @@ class Txt2SqlPromptBuilder:
     # ------------------------------------------------------------------ #
     # Entrada principal
     # ------------------------------------------------------------------ #
-    def build(self) -> str:
+    def build(self, schema_loader: SchemaLoader | None = None) -> str:
         """Constrói e retorna o system prompt completo."""
         sections = [
             self._section_intro(),
@@ -35,13 +40,13 @@ class Txt2SqlPromptBuilder:
             self._section_relationships(),
             self._section_glossary(),
             self._section_table_semantics(),
-            self._section_declarative_schema(),
+            self._section_column_semantics(schema_loader),
             self._section_volumetric_tables(),
             self._section_custom(),
         ]
         return "\n\n".join(s for s in sections if s)
 
-    def build_intent_prompt(self) -> str:
+    def build_intent_prompt(self, schema_loader: SchemaLoader | None = None) -> str:
         """System prompt do nó ``interpret_intent`` (sem regras de SQL/tools)."""
         sections = [
             (
@@ -57,11 +62,13 @@ class Txt2SqlPromptBuilder:
             self._section_glossary(),
             self._section_relationships(),
             self._section_table_semantics(),
-            self._section_declarative_schema(),
+            self._section_column_semantics(schema_loader),
             (
                 "## Regras do IntentPlan\n"
                 "- status=ready somente quando tabelas, filtros e métricas estiverem claros.\n"
                 "- status=needs_clarification quando faltar informação crítica.\n"
+                "- Reutilize fatos já ditos no histórico da conversa; não peça de novo "
+                "um valor que o usuário já informou.\n"
                 "- entities: faça grounding das menções do usuário (role table|column|value).\n"
                 "- filters/metrics/joins/group_by/order_by: use só table_id/column_id válidos.\n"
                 "- question_rewrite: reformule a pergunta desambiguada em PT-BR."
@@ -111,17 +118,22 @@ class Txt2SqlPromptBuilder:
     # Seção 3 — Regras gerais
     # ------------------------------------------------------------------ #
     def _section_general_rules(self) -> str:
+        # return (
+        #     "## 3. Regras gerais (OBRIGATÓRIAS)\n"
+        #     "- SOMENTE consultas de leitura (`SELECT`). NUNCA gere `INSERT`, `UPDATE`, "
+        #     "`DELETE`, `DROP`, `CREATE`, `ALTER`, `TRUNCATE`, `MERGE`, `EXEC` ou DDL/DML "
+        #     "de qualquer tipo — o guardrail rejeitará e a query falhará.\n"
+        #     "- NUNCA use `SELECT *`. Liste explicitamente apenas as colunas necessárias.\n"
+        #     f"- Limite os resultados a no máximo {self._config.top_k} linhas, a menos que "
+        #     "o usuário peça explicitamente mais.\n"
+        #     "- Sempre qualifique as colunas quando houver mais de uma tabela envolvida.\n"
+        #     "- Se a query falhar, leia a mensagem de erro, corrija e tente novamente."
+        # )
         return (
             "## 3. Regras gerais (OBRIGATÓRIAS)\n"
-            "- SOMENTE consultas de leitura (`SELECT`). NUNCA gere `INSERT`, `UPDATE`, "
-            "`DELETE`, `DROP`, `CREATE`, `ALTER`, `TRUNCATE`, `MERGE`, `EXEC` ou DDL/DML "
-            "de qualquer tipo — o guardrail rejeitará e a query falhará.\n"
-            "- NUNCA use `SELECT *`. Liste explicitamente apenas as colunas necessárias.\n"
-            f"- Limite os resultados a no máximo {self._config.top_k} linhas, a menos que "
-            "o usuário peça explicitamente mais.\n"
-            "- Sempre qualifique as colunas quando houver mais de uma tabela envolvida.\n"
-            "- Se a query falhar, leia a mensagem de erro, corrija e tente novamente."
+            "- Você pode executar qualquer tipo de SQL incluindo DML e DDL e consulta o banco de dados como quiser."
         )
+
 
     # ------------------------------------------------------------------ #
     # Seção 4 — Paginação
@@ -289,24 +301,53 @@ class Txt2SqlPromptBuilder:
         return "\n".join(lines)
 
     # ------------------------------------------------------------------ #
-    # Seção 9 — Schema declarativo (descrições de colunas)
+    # Seção 9 — Semântica das colunas (declarado + discovery)
     # ------------------------------------------------------------------ #
-    def _section_declarative_schema(self) -> str:
-        declared = [t for t in self._config.tables if t.is_declarative]
-        if not declared:
+    def _section_column_semantics(
+        self, schema_loader: SchemaLoader | None = None
+    ) -> str:
+        """Colunas: YAML (com description) e/ou discovery (nome + tipo)."""
+        blocks: list[str] = []
+        for table in self._config.tables:
+            if table.is_declarative:
+                lines = [f"\n### Tabela `{table.id}`"]
+                for col in table.columns:
+                    type_part = f" ({col.type})" if col.type else ""
+                    desc_part = f": {col.description}" if col.description else ""
+                    lines.append(f"- `{col.name}`{type_part}{desc_part}")
+                blocks.append("\n".join(lines))
+                continue
+
+            if schema_loader is None:
+                continue
+            cols = schema_loader.list_columns(table.id)
+            if not cols:
+                continue
+            lines = [f"\n### Tabela `{table.id}` (schema via discovery)"]
+            for col in cols:
+                type_part = f" ({col['type']})" if col.get("type") else ""
+                lines.append(f"- `{col['name']}`{type_part}")
+            blocks.append("\n".join(lines))
+
+        if not blocks:
             return ""
-        lines = ["## 9. Semântica das colunas (schema declarado)"]
-        for t in declared:
-            lines.append(f"\n### Tabela `{t.id}`")
-            for col in t.columns:
-                type_part = f" ({col.type})" if col.type else ""
-                desc_part = f": {col.description}" if col.description else ""
-                lines.append(f"- `{col.name}`{type_part}{desc_part}")
-        lines.append(
-            "\nUse essas descrições para escolher as colunas corretas e interpretar "
-            "corretamente valores e filtros."
+
+        header = [
+            "## 9. Semântica das colunas",
+            (
+                "Colunas declaradas no YAML incluem descrição; tabelas sem "
+                "`columns` no YAML usam discovery (nome + tipo) no banco de referência."
+            ),
+        ]
+        footer = (
+            "\nUse essas colunas para grounding de entities/filters/metrics — "
+            "não invente column_id fora desta lista."
         )
-        return "\n".join(lines)
+        return "\n".join(header) + "\n" + "\n".join(blocks) + "\n" + footer
+
+    def _section_declarative_schema(self) -> str:
+        """Compat: só colunas declaradas (sem discovery)."""
+        return self._section_column_semantics(schema_loader=None)
 
     # ------------------------------------------------------------------ #
     # Seção 10 — Tabelas volumétricas (DuckDB)

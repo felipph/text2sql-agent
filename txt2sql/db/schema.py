@@ -79,20 +79,46 @@ class SchemaLoader:
         """
         index: dict[str, set[str]] = {}
         for table in self._config.tables:
-            if table.is_declarative:
-                index[table.id] = {c.name for c in table.columns}
-                continue
-            engine = self._registry.get_inspection_engine(table.database)
-            inspector = inspect(engine)
-            try:
-                columns = inspector.get_columns(table.name, schema=table.schema)
-                index[table.id] = {c["name"] for c in columns}
-            except Exception as err:  # noqa: BLE001
-                logger.warning(
-                    "get_column_index: falha ao refletir {!r}: {}", table.id, err
-                )
-                index[table.id] = set()
+            cols = self.list_columns(table.id)
+            index[table.id] = {c["name"] for c in cols}
         return index
+
+    def list_columns(self, table_id: str) -> list[dict[str, str]]:
+        """Lista colunas com nome e tipo (e description se declarativa).
+
+        Returns:
+            Lista de dicts ``{name, type, description?}``. Em falha de discovery,
+            lista vazia (fail-closed).
+        """
+        table = self._config.get_table(table_id)
+        if table.is_declarative:
+            return [
+                {
+                    "name": col.name,
+                    "type": col.type or "",
+                    "description": col.description or "",
+                }
+                for col in table.columns
+            ]
+
+        engine = self._registry.get_inspection_engine(table.database)
+        inspector = inspect(engine)
+        try:
+            raw = inspector.get_columns(table.name, schema=table.schema)
+        except Exception as err:  # noqa: BLE001
+            logger.warning("list_columns: falha ao refletir {!r}: {}", table.id, err)
+            return []
+
+        out: list[dict[str, str]] = []
+        for col in raw:
+            out.append(
+                {
+                    "name": col["name"],
+                    "type": str(col.get("type") or ""),
+                    "description": "",
+                }
+            )
+        return out
 
     # ------------------------------------------------------------------ #
     # Modo declarativo
@@ -159,8 +185,8 @@ class SchemaLoader:
             pk_cols = pk.get("constrained_columns") or []
             if pk_cols:
                 lines.append(f"Primary key: {', '.join(pk_cols)}")
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as err:  # noqa: BLE001
+            logger.debug("PK indisponível para {!r}: {}", table.id, err)
 
         if include_samples and table.sample_rows > 0:
             samples = self._fetch_samples(table)

@@ -167,6 +167,13 @@ def _run_turn(agent: Any, question: str) -> None:
 
     st.session_state.messages = all_msgs
     debug = extract_state_debug(result)
+    if clarify:
+        # Resume/interrupt não passa por init_state — evita final_answer stale no painel
+        debug.final_answer = ""
+        debug.steps = []
+        debug.sql_history = []
+        debug.execution_path = ""
+        debug.last_result_status = ""
     st.session_state.last_debug = debug
     log_turn_debug(
         debug,

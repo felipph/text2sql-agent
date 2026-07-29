@@ -109,7 +109,7 @@ def test_prompt_includes_table_semantics_section() -> None:
     assert "## 8. Semântica das tabelas" in prompt
     assert "`clientes`: Cadastro de clientes." in prompt
     assert "`pedidos`" not in prompt.split("## 8. Semântica das tabelas")[1].split("##")[0]
-    assert "## 9. Semântica das colunas" not in prompt  # sem columns declaradas
+    assert "## 9. Semântica das colunas" not in prompt  # sem columns declaradas nem loader
 
 
 def test_prompt_omits_table_section_when_no_descriptions() -> None:
@@ -138,7 +138,7 @@ def test_prompt_renumbers_column_section_after_tables() -> None:
     )
     prompt = Txt2SqlPromptBuilder(config).build()
     assert "## 8. Semântica das tabelas" in prompt
-    assert "## 9. Semântica das colunas (schema declarado)" in prompt
+    assert "## 9. Semântica das colunas" in prompt
     assert "## 10. Tabelas volumétricas" not in prompt  # sem duckdb
     # custom seria 11 se existisse; volumétricas/custom só se aplicáveis
     assert "### Tabela `recebiveis`" in prompt
