@@ -22,7 +22,10 @@ tables:
     name: clientes
     description: >-
       Cadastro de clientes (PJ) com CNPJ e razão social. Não shardada.
-
+    duckdb:
+      enabled: true
+      trigger: join
+      fetch_limit: 100000
   - id: recebiveis
     database: db_main
     schema: public
@@ -49,6 +52,7 @@ tables:
       enabled: true
       trigger: aggregation
       fetch_limit: 100000
+      force_analytical: true
 
 relationships:
   - from: { table: recebiveis, column: cnpj }
@@ -67,10 +71,11 @@ agent:
   max_string_length: 10000
   read_only: true
   max_shard_discriminators: 20
+  query_timeout: 30
 
 llm:
-  deployment: gpt-4o
-  api_version: "2024-06-01"
+  deployment: gpt-5.4-mini
+  api_version: "2024-12-01-preview"
   temperature: 0.0
 
 custom_section: |

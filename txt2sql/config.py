@@ -103,11 +103,14 @@ class DuckDBConfig:
             ``"aggregation"``, ``"order"`` ou ``"join"``.
         fetch_limit: Número máximo de linhas buscadas do banco de origem ao
             materializar (default 100_000).
+        force_analytical: Se ``True``, obriga extract → DuckDB → análise.
+            ``trigger: always`` é alias que força este flag para ``True``.
     """
 
     enabled: bool = False
     trigger: str = "aggregation"
     fetch_limit: int = 100_000
+    force_analytical: bool = False
 
     _VALID_TRIGGERS = ("always", "aggregation", "order", "join")
 
@@ -116,6 +119,8 @@ class DuckDBConfig:
             raise ValueError(
                 f"trigger inválido: {self.trigger!r}. Válidos: {self._VALID_TRIGGERS}"
             )
+        if self.trigger == "always":
+            self.force_analytical = True
 
 
 @dataclass
@@ -163,6 +168,11 @@ class TableConfig:
         return self.duckdb is not None and self.duckdb.enabled
 
     @property
+    def requires_analytical(self) -> bool:
+        """Indica se a tabela exige rota analítica via DuckDB."""
+        return bool(self.duckdb and self.duckdb.enabled and self.duckdb.force_analytical)
+
+    @property
     def qualified_name(self) -> str:
         """Nome qualificado ``schema.name`` (ou apenas ``name``)."""
         return f"{self.schema}.{self.name}" if self.schema else self.name
@@ -179,6 +189,7 @@ class DatabaseConfig:
             Usado quando ``connection_string`` não é fornecida.
         read_only: Se ``True``, instala guardrail read-only no engine.
         connect_timeout: Timeout de conexão em segundos.
+        query_timeout: Timeout de execução SELECT em segundos; None herda o global do agente.
     """
 
     id: str
@@ -186,6 +197,7 @@ class DatabaseConfig:
     connection_env: str | None = None
     read_only: bool = True
     connect_timeout: int = 10
+    query_timeout: int | None = None
 
     def resolve_connection_string(
         self, override_connections: dict[str, str] | None = None
@@ -292,6 +304,7 @@ class AgentConfig:
         dialect: Dialeto SQL principal (informado ao LLM e ao guardrail).
         max_shard_discriminators: Máximo de discriminadores por chamada
             ``materialize_sharded_table`` (fan-in multi-shard).
+        query_timeout: Timeout default de execução SELECT (segundos); 0 desliga.
         llm: Configuração do provider LLM.
         override_connections: Overrides de connection string aplicados na carga.
     """
@@ -309,6 +322,7 @@ class AgentConfig:
     custom_section: str | None = None
     dialect: str | None = None
     max_shard_discriminators: int = 20
+    query_timeout: int = 30
 
     llm: LLMConfig = field(default_factory=LLMConfig)
     override_connections: dict[str, str] = field(default_factory=dict)
@@ -325,6 +339,16 @@ class AgentConfig:
             raise ValueError(
                 f"max_shard_discriminators deve ser >= 1, recebido: {self.max_shard_discriminators}"
             )
+        if self.query_timeout < 0:
+            raise ValueError(
+                f"query_timeout deve ser >= 0, recebido: {self.query_timeout}"
+            )
+        for db in self.databases:
+            if db.query_timeout is not None and db.query_timeout < 0:
+                raise ValueError(
+                    f"databases[{db.id!r}].query_timeout deve ser >= 0, "
+                    f"recebido: {db.query_timeout}"
+                )
         if len(self._db_index) != len(self.databases):
             raise ValueError("IDs de databases duplicados na configuração")
         if len(self._table_index) != len(self.tables):
@@ -340,6 +364,17 @@ class AgentConfig:
         if database_id not in self._db_index:
             raise KeyError(f"database_id desconhecido: {database_id!r}")
         return self._db_index[database_id]
+
+    def effective_query_timeout(self, database_id: str) -> int:
+        """Timeout efetivo de execução (segundos) para um banco.
+
+        Override por banco se definido; senão o global ``query_timeout``.
+        ``0`` desliga o deadline.
+        """
+        db = self.get_database(database_id)
+        if db.query_timeout is not None:
+            return db.query_timeout
+        return self.query_timeout
 
     def get_table(self, table_id: str) -> TableConfig:
         """Retorna a configuração de uma tabela por ID lógico."""
@@ -390,10 +425,15 @@ def _parse_sharding(raw: dict[str, Any] | None) -> ShardingConfig | None:
 def _parse_duckdb(raw: dict[str, Any] | None) -> DuckDBConfig | None:
     if not raw:
         return None
+    trigger = raw.get("trigger", "aggregation")
+    force = bool(raw.get("force_analytical", False))
+    if trigger == "always":
+        force = True
     return DuckDBConfig(
         enabled=bool(raw.get("enabled", False)),
-        trigger=raw.get("trigger", "aggregation"),
+        trigger=trigger,
         fetch_limit=int(raw.get("fetch_limit", 100_000)),
+        force_analytical=force,
     )
 
 
@@ -440,6 +480,9 @@ def load_config(
             connection_env=db.get("connection_env"),
             read_only=bool(db.get("read_only", True)),
             connect_timeout=int(db.get("connect_timeout", 10)),
+            query_timeout=(
+                int(db["query_timeout"]) if db.get("query_timeout") is not None else None
+            ),
         )
         for db in raw.get("databases", [])
     ]
@@ -503,6 +546,7 @@ def load_config(
         custom_section=raw.get("custom_section"),
         dialect=raw.get("dialect"),
         max_shard_discriminators=int(agent_raw.get("max_shard_discriminators", 20)),
+        query_timeout=int(agent_raw.get("query_timeout", 30)),
         llm=llm,
         override_connections=override_connections or {},
     )

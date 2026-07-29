@@ -70,6 +70,30 @@ class SchemaLoader:
         blocks = [self.get_table_info(tid, include_samples=include_samples) for tid in table_ids]
         return "\n\n".join(blocks)
 
+    def get_column_index(self) -> dict[str, set[str]]:
+        """Índice ``{table_id: {colunas}}`` para validação de intent.
+
+        * Declarativo: nomes em ``TableConfig.columns``.
+        * Discovery: ``inspect.get_columns``; falha de reflexão → set vazio
+          (fail-closed para refs de coluna nessa tabela).
+        """
+        index: dict[str, set[str]] = {}
+        for table in self._config.tables:
+            if table.is_declarative:
+                index[table.id] = {c.name for c in table.columns}
+                continue
+            engine = self._registry.get_inspection_engine(table.database)
+            inspector = inspect(engine)
+            try:
+                columns = inspector.get_columns(table.name, schema=table.schema)
+                index[table.id] = {c["name"] for c in columns}
+            except Exception as err:  # noqa: BLE001
+                logger.warning(
+                    "get_column_index: falha ao refletir {!r}: {}", table.id, err
+                )
+                index[table.id] = set()
+        return index
+
     # ------------------------------------------------------------------ #
     # Modo declarativo
     # ------------------------------------------------------------------ #

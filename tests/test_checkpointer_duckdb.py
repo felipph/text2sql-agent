@@ -20,17 +20,21 @@ from txt2sql.config import (
     ShardingConfig,
     TableConfig,
 )
+from txt2sql.intent import FilterClause, IntentPlan, MetricClause
 
 
 class ScriptedLLM:
-    def __init__(self, script: list[AIMessage]) -> None:
+    def __init__(self, script: list[Any]) -> None:
         self._script = script
         self._i = 0
 
-    def bind_tools(self, tools: list[Any]) -> "ScriptedLLM":  # noqa: ARG002
+    def bind_tools(self, tools: list[Any]) -> ScriptedLLM:
         return self
 
-    def invoke(self, messages: list[Any]) -> AIMessage:  # noqa: ARG002
+    def with_structured_output(self, schema: Any, **_kwargs: Any) -> ScriptedLLM:
+        return self
+
+    def invoke(self, messages: list[Any]) -> Any:
         msg = self._script[min(self._i, len(self._script) - 1)]
         self._i += 1
         return msg
@@ -80,7 +84,14 @@ def test_checkpointer_with_duckdb_session_does_not_raise(monkeypatch: Any) -> No
         dialect=None,
     )
 
+    ready = IntentPlan(
+        status="ready",
+        question_rewrite="soma dos recebíveis",
+        filters=[FilterClause(table_id="recebiveis", column_id="cnpj", op="eq", value="12345678000190")],
+        metrics=[MetricClause(table_id="recebiveis", column_id="valor", agg="sum")],
+    )
     script = [
+        ready,
         AIMessage(
             content="",
             tool_calls=[
@@ -108,7 +119,7 @@ def test_checkpointer_with_duckdb_session_does_not_raise(monkeypatch: Any) -> No
     ]
     monkeypatch.setattr(agent_mod, "build_llm", lambda config: ScriptedLLM(script))
 
-    agent = agent_mod.build_agent(cfg, checkpointer=MemorySaver())
+    agent = agent_mod.build_agent(cfg, checkpointer=MemorySaver(), dual_path=False)
     result = agent.invoke(
         {"messages": [HumanMessage(content="soma?")]},
         config={"configurable": {"thread_id": "t-duckdb"}},

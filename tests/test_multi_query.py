@@ -18,17 +18,21 @@ from txt2sql.config import (
     DatabaseConfig,
     TableConfig,
 )
+from txt2sql.intent import IntentPlan, MetricClause
 
 
 class ScriptedLLM:
-    def __init__(self, script: list[AIMessage]) -> None:
+    def __init__(self, script: list[Any]) -> None:
         self._script = script
         self._i = 0
 
-    def bind_tools(self, tools: list[Any]) -> "ScriptedLLM":  # noqa: ARG002
+    def bind_tools(self, tools: list[Any]) -> ScriptedLLM:
         return self
 
-    def invoke(self, messages: list[Any]) -> AIMessage:  # noqa: ARG002
+    def with_structured_output(self, schema: Any, **_kwargs: Any) -> ScriptedLLM:
+        return self
+
+    def invoke(self, messages: list[Any]) -> Any:
         msg = self._script[min(self._i, len(self._script) - 1)]
         self._i += 1
         return msg
@@ -69,7 +73,13 @@ def test_two_sql_db_query_in_same_step_both_execute(monkeypatch: Any) -> None:
         dialect=None,
     )
 
+    ready = IntentPlan(
+        status="ready",
+        question_rewrite="nomes dos clientes 111 e 222",
+        metrics=[MetricClause(table_id="clientes", column_id="razao_social", agg="none")],
+    )
     script = [
+        ready,
         AIMessage(
             content="",
             tool_calls=[
@@ -91,7 +101,7 @@ def test_two_sql_db_query_in_same_step_both_execute(monkeypatch: Any) -> None:
     ]
     monkeypatch.setattr(agent_mod, "build_llm", lambda config: ScriptedLLM(script))
 
-    agent = agent_mod.build_agent(cfg, checkpointer=MemorySaver())
+    agent = agent_mod.build_agent(cfg, checkpointer=MemorySaver(), dual_path=False)
     result = agent.invoke(
         {"messages": [HumanMessage(content="nomes?")]},
         config={"configurable": {"thread_id": "multi-q"}},

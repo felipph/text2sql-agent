@@ -41,6 +41,34 @@ class Txt2SqlPromptBuilder:
         ]
         return "\n\n".join(s for s in sections if s)
 
+    def build_intent_prompt(self) -> str:
+        """System prompt do nó ``interpret_intent`` (sem regras de SQL/tools)."""
+        sections = [
+            (
+                "## Persona\n"
+                "Você interpreta a pergunta do usuário e produz um IntentPlan semântico "
+                "casado com o schema do banco. Não escreva SQL. Não invente table_id nem "
+                "column_id — use apenas IDs existentes no schema fornecido nas mensagens.\n"
+                "Se a pergunta for ambígua (período, entidade, métrica, tabela), defina "
+                "status=needs_clarification e preencha clarification.question. "
+                "Não faça assumptions silenciosas: com status=ready, assumptions deve "
+                "permanecer vazio."
+            ),
+            self._section_glossary(),
+            self._section_relationships(),
+            self._section_table_semantics(),
+            self._section_declarative_schema(),
+            (
+                "## Regras do IntentPlan\n"
+                "- status=ready somente quando tabelas, filtros e métricas estiverem claros.\n"
+                "- status=needs_clarification quando faltar informação crítica.\n"
+                "- entities: faça grounding das menções do usuário (role table|column|value).\n"
+                "- filters/metrics/joins/group_by/order_by: use só table_id/column_id válidos.\n"
+                "- question_rewrite: reformule a pergunta desambiguada em PT-BR."
+            ),
+        ]
+        return "\n\n".join(s for s in sections if s)
+
     # ------------------------------------------------------------------ #
     # Seção 1 — Intro / persona + dialeto
     # ------------------------------------------------------------------ #

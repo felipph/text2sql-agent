@@ -23,6 +23,11 @@ class TurnDebug:
     steps: list[DebugStep] = field(default_factory=list)
     final_answer: str = ""
     looks_like_guardrail_reject: bool = False
+    execution_path: str = ""
+    sql_history: list[str] = field(default_factory=list)
+    last_result_status: str = ""
+    partial: bool = False
+    assumptions: list[str] = field(default_factory=list)
 
 
 _GUARDRAIL_MARKERS = (
@@ -76,6 +81,55 @@ def extract_turn_debug(messages: list[Any]) -> TurnDebug:
     )
 
 
+def extract_state_debug(result: dict[str, Any]) -> TurnDebug:
+    """Mescla debug de mensagens (ReAct) com campos de estado do dual-path."""
+    messages = list(result.get("messages") or [])
+    debug = extract_turn_debug(messages)
+
+    if result.get("final_answer"):
+        debug.final_answer = str(result["final_answer"])
+
+    debug.execution_path = str(result.get("execution_path") or "")
+    debug.sql_history = list(result.get("executed_sql_history") or [])
+    debug.partial = bool(result.get("partial", False))
+
+    last = result.get("last_result") or {}
+    debug.last_result_status = str(last.get("status") or "")
+
+    intent = result.get("intent_plan") or {}
+    debug.assumptions = list(intent.get("assumptions") or [])
+
+    for i, sql in enumerate(debug.sql_history, start=1):
+        debug.steps.append(
+            DebugStep(
+                name="sql",
+                args={"index": i},
+                result=sql,
+            )
+        )
+
+    if debug.last_result_status:
+        debug.steps.append(
+            DebugStep(
+                name="last_result",
+                args={"status": debug.last_result_status},
+                result=json.dumps(last, ensure_ascii=False, default=str),
+            )
+        )
+
+    if debug.execution_path:
+        debug.steps.insert(
+            0,
+            DebugStep(
+                name="execution_path",
+                args={"path": debug.execution_path},
+                result="",
+            ),
+        )
+
+    return debug
+
+
 def turn_debug_payload(
     debug: TurnDebug,
     *,
@@ -92,6 +146,11 @@ def turn_debug_payload(
         "expected": expected,
         "expected_notes": expected_notes,
         "looks_like_guardrail_reject": debug.looks_like_guardrail_reject,
+        "execution_path": debug.execution_path,
+        "sql_history": debug.sql_history,
+        "last_result_status": debug.last_result_status,
+        "partial": debug.partial,
+        "assumptions": debug.assumptions,
         "steps": [asdict(s) for s in debug.steps],
         "final_answer": debug.final_answer,
     }

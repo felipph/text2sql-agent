@@ -1,2 +1,0 @@
--- Seed playground: shard1
--- (nenhuma tabela neste shard nesta geração)

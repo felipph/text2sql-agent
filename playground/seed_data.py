@@ -23,9 +23,11 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 
 ROOT = Path(__file__).resolve().parent
+load_dotenv(ROOT / ".env")
 DEFAULT_PARAMS = ROOT / "seed_params.yaml"
 DEFAULT_PROMPTS = ROOT / "prompts.yaml"
 DEFAULT_SEED_DIR = ROOT / "seed"

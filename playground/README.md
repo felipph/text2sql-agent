@@ -7,6 +7,7 @@ Harness manual: Postgres (1 main + 2 shards) + UI Streamlit com painel de debug.
 - Docker + Docker Compose
 - Python ≥ 3.12 e deps do projeto (`uv sync --extra playground` ou `pip install -e ".[playground]"`)
 - Credenciais Azure OpenAI (`AZURE_OPENAI_*`)
+- (Opcional) Langfuse — `LANGFUSE_PUBLIC_KEY` + `LANGFUSE_SECRET_KEY` (o extra `playground` já inclui o pacote `langfuse`)
 
 ## Subir os bancos
 
@@ -23,8 +24,11 @@ Copie o env de exemplo e preencha a chave Azure:
 ```bash
 cp .env.example .env
 # edite AZURE_OPENAI_*
-set -a && source .env && set +a
+# opcional: LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY / LANGFUSE_HOST
 ```
+
+O `app.py` e o `seed_data.py` carregam `playground/.env` automaticamente
+(vars já exportadas no shell têm prioridade).
 
 ## Seed (gerador paramétrico)
 
@@ -71,8 +75,23 @@ Cada turno também grava o mesmo payload de debug:
 - em `playground/logs/turns.jsonl` (uma linha JSON por turno — útil para
   revisar falhas e aprimorar prompts/agente)
 
+### Langfuse
+
+Com `LANGFUSE_PUBLIC_KEY` e `LANGFUSE_SECRET_KEY` no `.env`, cada
+`agent.invoke` envia um trace (tag `playground`, `session_id` = thread da
+conversa). A sidebar mostra se o tracing está on/off.
+
+```bash
+# no .env
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_SECRET_KEY=sk-lf-...
+# LANGFUSE_HOST=https://cloud.langfuse.com   # ou self-hosted
+```
+
+Reinicie o Streamlit após editar o `.env`.
+
 ## Layout
 
-- Sidebar: status dos DBs, thread, perguntas prontas
+- Sidebar: status dos DBs, Langfuse, thread, perguntas prontas
 - Centro: chat
-- Direita: tool calls, SQL, shards, guardrail, expected
+- Direita: path, SQL, provenance, expected

@@ -5,7 +5,7 @@ Superfície Python exportada por `txt2sql`. Sem servidor OpenAPI — a “API”
 ## Imports estáveis
 
 ```python
-from txt2sql import build_agent, load_config, AgentConfig, ShardResult
+from txt2sql import build_agent, load_config, AgentConfig, ShardResult, QueryTimeoutError
 ```
 
 | Símbolo | Descrição |
@@ -14,6 +14,7 @@ from txt2sql import build_agent, load_config, AgentConfig, ShardResult
 | `build_agent(config, checkpointer=None) -> CompiledStateGraph` | Compila o grafo LangGraph. |
 | `AgentConfig` | Dataclass raiz da configuração. |
 | `ShardResult(database_id, table_name)` | Retorno de resolvers de shard. |
+| `QueryTimeoutError` | SELECT OLTP excedeu `query_timeout`; vira `ToolMessage` no grafo. |
 
 Versão: `txt2sql.__version__`.
 
@@ -52,6 +53,9 @@ Implementação real está nos nós do grafo; as `StructuredTool` usam placehold
 | `top_k` | 20 | Truncamento de linhas no resultado |
 | `max_pages` | 10 | Máx. de queries de dados por turno |
 | `max_shard_discriminators` | 20 | Máx. de discriminadores por `materialize_sharded_table` |
+| `query_timeout` | 30 | Timeout de execução SELECT OLTP (segundos); `0` desliga |
+
+Cada entrada em `databases[]` pode definir `query_timeout` opcional para sobrescrever o global. Use `AgentConfig.effective_query_timeout(database_id)` para obter o valor efetivo (override por banco ou herança do `agent`).
 
 ## Módulos internos úteis (sem garantia de estabilidade)
 

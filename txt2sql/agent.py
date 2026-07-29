@@ -8,8 +8,12 @@ dos nós por :func:`build_agent`.
 Fluxo de nós:
 
     START → init_turn → route_discovery
-              ├─[schema não carregado]→ load_schema → generate_query
-              └─[schema carregado]───────────────────→ generate_query
+              ├─[schema não carregado]→ load_schema → interpret_intent
+              └─[schema carregado]───────────────────→ interpret_intent
+    interpret_intent
+        ├─[needs_clarification]→ ask_clarification → (interrupt|END)
+        ├─[intent inválido]────→ interpret_intent (retry)
+        └─[intent válido]──────→ generate_query → …
     generate_query
         ├─[sem tool_calls]───────────────────────────────────────→ END
         ├─[resolve_shard]→ run_resolve_shard ─────────────────────→ generate_query
@@ -25,12 +29,13 @@ import json
 from typing import Annotated, Any
 
 import sqlglot
-from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from langgraph.channels.untracked_value import UntrackedValue
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import MessagesState
 from langgraph.graph.state import CompiledStateGraph
+from langgraph.types import interrupt
 from loguru import logger
 from pydantic import BaseModel, Field
 from sqlalchemy import exc as sa_exc
@@ -38,13 +43,16 @@ from sqlalchemy import exc as sa_exc
 from txt2sql.config import AgentConfig, ShardResult, TableConfig
 from txt2sql.db.duckdb_layer import DuckDBSession, needs_duckdb
 from txt2sql.db.multi_shard import materialize_sharded_values
-from txt2sql.db.registry import DatabaseRegistry
+from txt2sql.db.registry import DatabaseRegistry, QueryTimeoutError
 from txt2sql.db.schema import SchemaLoader
 from txt2sql.db.shard import ShardResolver
 from txt2sql.guardrail import ReadOnlyViolationError, validate_sql
+from txt2sql.intent import Clarification, IntentPlan, validate_intent
 from txt2sql.llm import build_llm
 from txt2sql.prompts import Txt2SqlPromptBuilder
 from txt2sql.query_routing import analyze_table_refs, routing_rejection_reason
+
+MAX_INTENT_RETRIES = 2
 
 
 # --------------------------------------------------------------------------- #
@@ -62,6 +70,9 @@ class AgentState(MessagesState):
         resolved_shards: Cache de shards resolvidos no turno.
         multi_materialized: Metadados de fan-in multi-shard por ``table_id``.
         pending_queries: Fila de queries validadas aguardando execução sequencial.
+        intent_plan: IntentPlan serializado (dict) após interpretação/validação.
+        intent_retries: Contador de retries de validação no turno.
+        intent_route: Próximo destino após ``interpret_intent``.
     """
 
     page_count: int
@@ -70,6 +81,9 @@ class AgentState(MessagesState):
     resolved_shards: dict[tuple[str, str], ShardResult]
     multi_materialized: dict[str, dict[str, Any]]
     pending_queries: list[dict[str, Any]]
+    intent_plan: dict[str, Any] | None
+    intent_retries: int
+    intent_route: str
 
 
 # --------------------------------------------------------------------------- #
@@ -156,6 +170,8 @@ def _last_ai_message(state: AgentState) -> AIMessage:
 def build_agent(
     config: AgentConfig,
     checkpointer: Any | None = None,
+    *,
+    dual_path: bool = True,
 ) -> CompiledStateGraph:
     """Constrói e compila o grafo LangGraph do agente Text-to-SQL.
 
@@ -164,17 +180,27 @@ def build_agent(
         checkpointer: Checkpointer externo do LangGraph (opcional). A biblioteca
             NÃO gerencia checkpointer internamente — é responsabilidade do caller
             fornecer um (ex.: ``MemorySaver`` ou ``AsyncPostgresSaver``).
+        dual_path: Se ``True`` (padrão), usa o grafo dual-path de :mod:`txt2sql.graph`
+            (simple | analytical). Passe ``dual_path=False`` para o grafo ReAct legado.
 
     Returns:
         O grafo compilado, pronto para ``invoke``/``stream``.
     """
+    if dual_path:
+        from txt2sql.graph import build_graph
+
+        return build_graph(config, checkpointer=checkpointer)
+
     registry = DatabaseRegistry(config)
     schema_loader = SchemaLoader(config, registry)
     shard_resolver = ShardResolver(config, registry) if config.sharded_tables else None
     prompt_builder = Txt2SqlPromptBuilder(config)
     system_prompt = prompt_builder.build()
+    intent_prompt = prompt_builder.build_intent_prompt()
+    has_checkpointer = checkpointer is not None
 
     llm = build_llm(config)
+    intent_llm = llm.with_structured_output(IntentPlan)
 
     # -- tools expostas ao LLM ------------------------------------------- #
     schema_tool = StructuredTool.from_function(
@@ -307,6 +333,9 @@ def build_agent(
             "resolved_shards": {},
             "multi_materialized": {},
             "pending_queries": [],
+            "intent_plan": None,
+            "intent_retries": 0,
+            "intent_route": "",
         }
 
     def load_schema(state: AgentState) -> dict[str, Any]:
@@ -319,10 +348,135 @@ def build_agent(
         )
         return {"messages": [msg], "schema_loaded": True}
 
+    def _coerce_intent_plan(raw: Any) -> IntentPlan:
+        if isinstance(raw, IntentPlan):
+            return raw
+        if isinstance(raw, dict):
+            return IntentPlan.model_validate(raw)
+        return IntentPlan.model_validate(raw)
+
+    def interpret_intent(state: AgentState) -> dict[str, Any]:
+        """Interpreta a pergunta em IntentPlan e valida contra o schema."""
+        logger.info(
+            "interpret_intent: invocando LLM (retries={})", state.get("intent_retries", 0)
+        )
+        messages = [SystemMessage(content=intent_prompt), *state["messages"]]
+        plan: IntentPlan | None = None
+        parse_error: str | None = None
+        for attempt in range(2):
+            try:
+                plan = _coerce_intent_plan(intent_llm.invoke(messages))
+                parse_error = None
+                break
+            except Exception as err:  # noqa: BLE001
+                parse_error = str(err)
+                logger.warning("interpret_intent: structured output falhou ({}/2): {}", attempt + 1, err)
+
+        if plan is None:
+            plan = IntentPlan(
+                status="needs_clarification",
+                question_rewrite="",
+                clarification=Clarification(
+                    question="Não entendi a pergunta. Pode reformular com mais detalhes?"
+                ),
+            )
+
+        if plan.status == "needs_clarification":
+            if plan.clarification is None or not plan.clarification.question.strip():
+                plan = plan.model_copy(
+                    update={
+                        "clarification": Clarification(
+                            question="Pode esclarecer a pergunta? Faltam detalhes para mapear ao schema."
+                        )
+                    }
+                )
+            return {
+                "intent_plan": plan.model_dump(),
+                "intent_route": "ask_clarification",
+            }
+
+        schema_index = schema_loader.get_column_index()
+        validation = validate_intent(plan, schema_index)
+        if validation.ok:
+            logger.info("interpret_intent: plan válido → generate_query")
+            return {
+                "intent_plan": plan.model_dump(),
+                "intent_route": "generate_query",
+            }
+
+        retries = int(state.get("intent_retries", 0)) + 1
+        errors_txt = "; ".join(validation.errors) or (parse_error or "plan inválido")
+        if retries >= MAX_INTENT_RETRIES:
+            logger.warning("interpret_intent: retries esgotados → clarificação")
+            clarify = IntentPlan(
+                status="needs_clarification",
+                question_rewrite=plan.question_rewrite,
+                clarification=Clarification(
+                    question=(
+                        "Não consegui mapear a pergunta ao schema. "
+                        f"Problemas: {errors_txt}. Pode reformular ou esclarecer?"
+                    )
+                ),
+            )
+            return {
+                "intent_plan": clarify.model_dump(),
+                "intent_retries": retries,
+                "intent_route": "ask_clarification",
+            }
+
+        feedback = SystemMessage(
+            content=(
+                "O IntentPlan anterior é inválido em relação ao schema. "
+                f"Corrija e tente de novo. Erros: {errors_txt}"
+            )
+        )
+        logger.info("interpret_intent: plan inválido → retry ({}/{})", retries, MAX_INTENT_RETRIES)
+        return {
+            "messages": [feedback],
+            "intent_plan": plan.model_dump(),
+            "intent_retries": retries,
+            "intent_route": "interpret_intent",
+        }
+
+    def ask_clarification(state: AgentState) -> dict[str, Any]:
+        """Pergunta de esclarecimento (interrupt com checkpointer, senão AIMessage)."""
+        plan_raw = state.get("intent_plan") or {}
+        clarification = plan_raw.get("clarification") or {}
+        question = clarification.get("question") or "Pode esclarecer a pergunta?"
+        options = clarification.get("options") or []
+        logger.info("ask_clarification: {}", question[:120])
+
+        if has_checkpointer:
+            answer = interrupt(
+                {
+                    "type": "clarification",
+                    "question": question,
+                    "options": options,
+                }
+            )
+            return {"messages": [HumanMessage(content=str(answer))]}
+
+        text = question
+        if options:
+            text = question + "\nOpções: " + ", ".join(str(o) for o in options)
+        return {"messages": [AIMessage(content=text)]}
+
     def generate_query(state: AgentState) -> dict[str, Any]:
         """Invoca o LLM (com tools) para produzir tool calls ou a resposta final."""
         logger.info("generate_query: invocando LLM (page_count={})", state.get("page_count", 0))
-        messages = [SystemMessage(content=system_prompt), *state["messages"]]
+        messages: list[Any] = [SystemMessage(content=system_prompt)]
+        plan = state.get("intent_plan")
+        if plan:
+            messages.append(
+                SystemMessage(
+                    content=(
+                        "IntentPlan validado — traduza este intent em SQL/tools. "
+                        "Não invente tabelas ou colunas fora deste plan:\n"
+                        + json.dumps(plan, ensure_ascii=False, indent=2)
+                    )
+                )
+            )
+        messages.extend(state["messages"])
         response = llm_with_tools.invoke(messages)
         return {"messages": [response]}
 
@@ -590,6 +744,12 @@ def build_agent(
                 try:
                     rows = registry.execute(database_id, sql)
                     content = _rows_to_text(rows, config.max_string_length, config.top_k)
+                except QueryTimeoutError as err:
+                    logger.warning("execute_queries: timeout OLTP: {}", err)
+                    content = (
+                        f"ERRO: query excedeu o timeout de {err.timeout} segundos. "
+                        "Simplifique a consulta ou filtre mais."
+                    )
                 except (sa_exc.SQLAlchemyError, ReadOnlyViolationError) as err:
                     logger.warning("execute_queries: erro OLTP: {}", err)
                     content = f"ERRO ao executar a query: {err}"
@@ -608,7 +768,13 @@ def build_agent(
     # Roteadores (edges condicionais)
     # ------------------------------------------------------------------ #
     def route_discovery(state: AgentState) -> str:
-        return "generate_query" if state.get("schema_loaded") else "load_schema"
+        return "interpret_intent" if state.get("schema_loaded") else "load_schema"
+
+    def route_after_intent(state: AgentState) -> str:
+        route = state.get("intent_route") or "generate_query"
+        if route in {"ask_clarification", "interpret_intent", "generate_query"}:
+            return route
+        return "generate_query"
 
     def route_after_generate(state: AgentState) -> str:
         ai = _last_ai_message(state)
@@ -636,6 +802,8 @@ def build_agent(
     graph = StateGraph(AgentState)
     graph.add_node("init_turn", init_turn)
     graph.add_node("load_schema", load_schema)
+    graph.add_node("interpret_intent", interpret_intent)
+    graph.add_node("ask_clarification", ask_clarification)
     graph.add_node("generate_query", generate_query)
     graph.add_node("run_resolve_shard", run_resolve_shard)
     graph.add_node("run_materialize_sharded", run_materialize_sharded)
@@ -644,8 +812,19 @@ def build_agent(
     graph.add_node("execute_queries", execute_queries)
 
     graph.add_edge(START, "init_turn")
-    graph.add_conditional_edges("init_turn", route_discovery, ["load_schema", "generate_query"])
-    graph.add_edge("load_schema", "generate_query")
+    graph.add_conditional_edges(
+        "init_turn", route_discovery, ["load_schema", "interpret_intent"]
+    )
+    graph.add_edge("load_schema", "interpret_intent")
+    graph.add_conditional_edges(
+        "interpret_intent",
+        route_after_intent,
+        ["ask_clarification", "interpret_intent", "generate_query"],
+    )
+    if has_checkpointer:
+        graph.add_edge("ask_clarification", "interpret_intent")
+    else:
+        graph.add_edge("ask_clarification", END)
     graph.add_conditional_edges(
         "generate_query",
         route_after_generate,
@@ -668,7 +847,10 @@ def build_agent(
     graph.add_edge("execute_queries", "generate_query")
 
     compiled = graph.compile(checkpointer=checkpointer)
-    compiled.get_graph().print_ascii()
+    try:
+        compiled.get_graph().print_ascii()
+    except Exception as err:  # noqa: BLE001 — ascii do grandalf falha com self-loops
+        logger.debug("print_ascii do grafo indisponível: {}", err)
     logger.info("Agente Text-to-SQL compilado com sucesso.")
     return compiled
 

@@ -34,6 +34,8 @@ dev = [
 playground = [
     "streamlit>=1.32.0",
     "psycopg[binary]>=3.1.0",
+    "langfuse>=2.0.0",
+    "python-dotenv>=1.0.0",
 ]
 
 [project.urls]

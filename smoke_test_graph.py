@@ -24,6 +24,7 @@ from txt2sql.config import (
     ShardingConfig,
     TableConfig,
 )
+from txt2sql.intent import FilterClause, IntentPlan, MetricClause
 
 FAILS = 0
 
@@ -36,16 +37,19 @@ def check(name: str, cond: bool) -> None:
 
 
 class ScriptedLLM:
-    """LLM falso que devolve uma sequência pré-definida de AIMessages."""
+    """LLM falso que devolve IntentPlan + AIMessages scriptados."""
 
-    def __init__(self, script: list[AIMessage]) -> None:
+    def __init__(self, script: list[Any]) -> None:
         self._script = script
         self._i = 0
 
-    def bind_tools(self, tools: list[Any]) -> "ScriptedLLM":  # noqa: ARG002
+    def bind_tools(self, tools: list[Any]) -> ScriptedLLM:
         return self
 
-    def invoke(self, messages: list[Any]) -> AIMessage:  # noqa: ARG002
+    def with_structured_output(self, schema: Any, **_kwargs: Any) -> ScriptedLLM:
+        return self
+
+    def invoke(self, messages: list[Any]) -> Any:
         msg = self._script[min(self._i, len(self._script) - 1)]
         self._i += 1
         return msg
@@ -98,8 +102,15 @@ cfg = AgentConfig(
     dialect=None,
 )
 
-# Script: 1) resolve_shard  2) sql_db_query com SUM (agregação -> DuckDB)  3) resposta final
+# Script: 0) IntentPlan  1) resolve_shard  2) sql_db_query  3) resposta final
+ready = IntentPlan(
+    status="ready",
+    question_rewrite="total de recebíveis do CNPJ",
+    filters=[FilterClause(table_id="recebiveis", column_id="cnpj", op="eq", value="12345678000190")],
+    metrics=[MetricClause(table_id="recebiveis", column_id="valor", agg="sum")],
+)
 script = [
+    ready,
     AIMessage(
         content="",
         tool_calls=[
@@ -126,7 +137,7 @@ script = [
 # injeta o LLM falso
 agent_mod.build_llm = lambda config: ScriptedLLM(script)  # type: ignore
 
-agent = agent_mod.build_agent(cfg)
+agent = agent_mod.build_agent(cfg, dual_path=False)
 
 from langchain_core.messages import HumanMessage
 

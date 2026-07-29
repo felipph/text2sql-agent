@@ -15,14 +15,22 @@ from typing import Any
 
 import streamlit as st
 import yaml
+from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import Command
 from sqlalchemy import create_engine, text
 
-from playground.debug_view import TurnDebug, extract_turn_debug, log_turn_debug
+from playground.debug_view import TurnDebug, extract_state_debug, log_turn_debug
 from txt2sql import build_agent, load_config
+from txt2sql.tracing import (
+    build_tracing_run_config,
+    flush_tracing_callbacks,
+    is_tracing_enabled,
+)
 
 ROOT = Path(__file__).resolve().parent
+load_dotenv(ROOT / ".env")
 CONFIG_PATH = ROOT / "config.yaml"
 PROMPTS_PATH = ROOT / "prompts.yaml"
 MANIFEST_PATH = ROOT / "seed_manifest.json"
@@ -99,17 +107,66 @@ def _init_state() -> None:
         st.session_state.expected_notes = None
     if "pending_question" not in st.session_state:
         st.session_state.pending_question = None
+    if "awaiting_clarification" not in st.session_state:
+        st.session_state.awaiting_clarification = False
+
+
+def _extract_interrupt_question(result: dict[str, Any]) -> str | None:
+    interrupts = result.get("__interrupt__") or []
+    for item in interrupts:
+        value = getattr(item, "value", None) or item
+        if isinstance(value, dict) and value.get("type") == "clarification":
+            question = str(value.get("question") or "").strip()
+            options = value.get("options") or []
+            if options:
+                question = question + "\nOpções: " + ", ".join(str(o) for o in options)
+            return question or None
+    return None
+
+
+def _run_config() -> tuple[dict[str, Any], list[Any]]:
+    """Config LangGraph do turno + callbacks Langfuse (se habilitado)."""
+    thread_id = st.session_state.thread_id
+    tracing = build_tracing_run_config(
+        session_id=thread_id,
+        trace_name="txt2sql-playground",
+        tags=["playground", "dual-path"],
+        metadata={"app": "playground"},
+    )
+    cfg: dict[str, Any] = {"configurable": {"thread_id": thread_id}, **tracing}
+    return cfg, list(tracing.get("callbacks") or [])
 
 
 def _run_turn(agent: Any, question: str) -> None:
+    cfg, callbacks = _run_config()
     st.session_state.messages.append(HumanMessage(content=question))
-    result = agent.invoke(
-        {"messages": [HumanMessage(content=question)]},
-        config={"configurable": {"thread_id": st.session_state.thread_id}},
-    )
+
+    try:
+        if st.session_state.awaiting_clarification:
+            result = agent.invoke(Command(resume=question), config=cfg)
+        else:
+            result = agent.invoke(
+                {"messages": [HumanMessage(content=question)]},
+                config=cfg,
+            )
+    finally:
+        flush_tracing_callbacks(callbacks)
+
+    clarify = _extract_interrupt_question(result)
     all_msgs = list(result.get("messages") or [])
+    if clarify:
+        all_msgs = [*all_msgs, AIMessage(content=clarify)]
+        st.session_state.awaiting_clarification = True
+    else:
+        st.session_state.awaiting_clarification = False
+        final = result.get("final_answer")
+        if final and all_msgs:
+            last = all_msgs[-1]
+            if isinstance(last, AIMessage) and not getattr(last, "tool_calls", None):
+                all_msgs = [*all_msgs[:-1], AIMessage(content=str(final))]
+
     st.session_state.messages = all_msgs
-    debug = extract_turn_debug(all_msgs)
+    debug = extract_state_debug(result)
     st.session_state.last_debug = debug
     log_turn_debug(
         debug,
@@ -123,7 +180,9 @@ def _run_turn(agent: Any, question: str) -> None:
 def main() -> None:
     st.set_page_config(page_title="txt2sql playground", layout="wide")
     st.title("txt2sql playground")
-    st.caption("Chat + debug de tools / SQL / shards · Postgres local via docker-compose")
+    st.caption(
+        "Chat + debug dual-path (simple | analytical) · proveniência SQL · Postgres local"
+    )
     _init_state()
 
     with st.sidebar:
@@ -149,6 +208,20 @@ def main() -> None:
                 st.warning(sync_msg)
 
         st.divider()
+        st.subheader("Tracing")
+        if is_tracing_enabled():
+            host = os.environ.get("LANGFUSE_BASE_URL", "https://cloud.langfuse.com")
+            pk = os.environ.get("LANGFUSE_PUBLIC_KEY", "???")
+            st.success(f"Langfuse on · `{host}`")
+            st.success(f"Langfuse PK · `{pk}`")
+            st.caption("Traces agrupados por thread_id da conversa.")
+        else:
+            st.info(
+                "Langfuse off — defina `LANGFUSE_PUBLIC_KEY` e "
+                "`LANGFUSE_SECRET_KEY` no `.env`."
+            )
+
+        st.divider()
         st.text(f"YAML: {CONFIG_PATH.name}")
         st.code(st.session_state.thread_id, language=None)
         if st.button("Nova conversa"):
@@ -157,6 +230,7 @@ def main() -> None:
             st.session_state.last_debug = TurnDebug()
             st.session_state.expected = None
             st.session_state.expected_notes = None
+            st.session_state.awaiting_clarification = False
             st.rerun()
 
         st.subheader("Perguntas prontas")
@@ -205,6 +279,18 @@ def main() -> None:
                 st.caption(st.session_state.expected_notes)
         if debug.looks_like_guardrail_reject:
             st.warning("Possível rejeição de guardrail detectada.")
+        if debug.execution_path:
+            st.caption(f"**Path:** `{debug.execution_path}`")
+        if debug.last_result_status:
+            st.caption(f"**last_result:** `{debug.last_result_status}`")
+        if debug.partial:
+            st.warning("Resposta parcial (budget/materialização limitada).")
+        if debug.assumptions:
+            st.caption("**Assunções:** " + "; ".join(debug.assumptions))
+        if debug.sql_history:
+            with st.expander("SQL executado", expanded=False):
+                for i, sql in enumerate(debug.sql_history, start=1):
+                    st.code(sql, language="sql")
         if not debug.steps and not debug.final_answer:
             st.caption("Nenhuma tool call ainda.")
         for i, step in enumerate(debug.steps, start=1):

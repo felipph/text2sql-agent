@@ -13,13 +13,13 @@ Como configurar um agente `txt2sql` para diferentes ambientes.
 | Bloco | Função |
 |-------|--------|
 | `dialect` | Dialeto SQL (prompt + guardrail) |
-| `databases[]` | Engines (`connection_string` ou `connection_env`, `read_only`) |
+| `databases[]` | Engines (`connection_string` ou `connection_env`, `read_only`, `query_timeout` opcional) |
 | `tables[]` | Tabelas lógicas; `columns` → declarativo; ausente → discovery |
 | `tables[].description` | Texto negocial da tabela (prompt + schema); opcional |
 | `tables[].sharding` | `discriminator_column` + `resolver` dotted |
-| `tables[].duckdb` | `enabled`, `trigger`, `fetch_limit` |
+| `tables[].duckdb` | `enabled`, `trigger`, `fetch_limit`, `force_analytical` |
 | `relationships[]` / `glossary[]` | Contexto semântico no prompt |
-| `agent` | `top_k`, `max_pages`, `max_string_length`, `read_only` |
+| `agent` | `top_k`, `max_pages`, `max_string_length`, `read_only`, `query_timeout` (default 30; `0` desliga) |
 | `llm` | Azure OpenAI (opcional se env vars completas) |
 | `custom_section` | Texto livre no system prompt |
 

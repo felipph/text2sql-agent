@@ -22,6 +22,7 @@ uv sync                              # Instalar deps (ou: pip install -e ".[dev]
 ```
 txt2sql/           # Pacote
   agent.py         # build_agent + nós do grafo
+  intent.py        # IntentPlan + validate_intent
   config.py        # load_config + dataclasses
   guardrail.py     # validate_sql fail-closed
   db/              # registry, schema, shard, duckdb_layer
@@ -38,11 +39,13 @@ docs/superpowers/  # Specs e plans de features (não é doc de produto)
 - IDs de tabela no YAML são lógicos; nomes físicos podem diferir após shard.
 - `materialize` no DuckDB usa lotes (`BATCH_SIZE`); não usar `fetchall` na origem.
 - Guardrail é fail-closed: qualquer dúvida → rejeitar.
+- Antes do SQL: `interpret_intent` valida um `IntentPlan`; ambiguidade → HITL (`interrupt` com checkpointer).
+- Dual-path (padrão): `build_agent(...)` usa grafo simple|analytical; passe `dual_path=False` para ReAct legado.
 
 ## Gotchas
 
 - Checkpointer **não** é criado pela lib — passe via `build_agent(..., checkpointer=...)`.
-- Tabelas shardadas: single → `resolve_shard` antes de `sql_db_query`; multi (2+) → `materialize_sharded_table` e query no nome lógico. Fan-out cego é proibido.
+- Tabelas shardadas (ReAct): single → `resolve_shard` antes de `sql_db_query`; multi (2+) → `materialize_sharded_table` e query no nome lógico. Fan-out cego é proibido. No dual-path, sharding via `resolve_routing` — não chame tools de shard manualmente.
 - Sem `columns` no YAML → discovery no `database` de referência; com `columns` → declarativo.
 - Env vars de banco vêm de `connection_env` no YAML (ex.: `MAIN_DB_URL`), não de nomes fixos.
 - `AZURE_OPENAI_*` são obrigatórias se o bloco `llm` do YAML estiver incompleto.

@@ -2,11 +2,14 @@
 
 O :class:`DatabaseRegistry` cria e mantém um engine SQLAlchemy por banco
 declarado na configuração, instalando um *guardrail listener* de somente-leitura
-em cada engine marcado como ``read_only`` e aplicando timeouts de conexão.
+em cada engine marcado como ``read_only``, aplicando timeouts de conexão e,
+opcionalmente, deadline de execução de queries SELECT no cliente.
 """
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeout
 from typing import Any
 
 from loguru import logger
@@ -15,6 +18,17 @@ from sqlalchemy.engine import make_url
 
 from txt2sql.config import AgentConfig, DatabaseConfig
 from txt2sql.guardrail import ReadOnlyViolationError, validate_sql
+
+
+class QueryTimeoutError(Exception):
+    """Query SELECT excedeu o ``query_timeout`` configurado."""
+
+    def __init__(self, database_id: str, timeout: int) -> None:
+        self.database_id = database_id
+        self.timeout = timeout
+        super().__init__(
+            f"Query no banco {database_id!r} excedeu o timeout de {timeout}s"
+        )
 
 
 class DatabaseRegistry:
@@ -87,7 +101,7 @@ class DatabaseRegistry:
         dialect_name = self._sqlglot_dialect(engine)
 
         @event.listens_for(engine, "before_cursor_execute")
-        def _before_cursor_execute(  # noqa: ANN001, ANN202
+        def _before_cursor_execute(
             conn, cursor, statement, parameters, context, executemany
         ):
             # Ignora pings internos do pool e comandos vazios.
@@ -165,6 +179,10 @@ class DatabaseRegistry:
     def execute(self, database_id: str, sql: str) -> list[dict[str, Any]]:
         """Executa uma query e retorna as linhas como lista de dicts.
 
+        Respeita ``AgentConfig.effective_query_timeout``: se > 0, aplica
+        deadline no cliente (thread + join). Estouro →
+        :class:`QueryTimeoutError` após cancel/invalidate best-effort.
+
         A validação de somente-leitura já ocorre no listener do engine quando
         ``read_only=True``; aqui apenas executamos e materializamos o resultado.
 
@@ -175,11 +193,55 @@ class DatabaseRegistry:
         Returns:
             Lista de linhas como dicionários ``{coluna: valor}``.
         """
+        timeout = self._config.effective_query_timeout(database_id)
         engine = self.get_engine(database_id)
-        with engine.connect() as conn:
-            result = conn.execute(text(sql))
-            columns = list(result.keys())
-            return [dict(zip(columns, row)) for row in result.fetchall()]
+
+        if timeout == 0:
+            with engine.connect() as conn:
+                return self._fetch_dicts(conn, sql)
+
+        conn = engine.connect()
+        pool = ThreadPoolExecutor(max_workers=1)
+        try:
+            future = pool.submit(self._fetch_dicts, conn, sql)
+            try:
+                return future.result(timeout=timeout)
+            except FuturesTimeout as err:
+                self._cancel_connection(conn)
+                raise QueryTimeoutError(database_id, timeout) from err
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001, S110
+                pass
+
+    @staticmethod
+    def _fetch_dicts(conn: Connection, sql: str) -> list[dict[str, Any]]:
+        result = conn.execute(text(sql))
+        columns = list(result.keys())
+        return [dict(zip(columns, row)) for row in result.fetchall()]
+
+    @staticmethod
+    def _cancel_connection(conn: Connection) -> None:
+        """Tenta cancelar a query e invalidar a conexão (best-effort)."""
+        try:
+            dbapi = getattr(conn, "connection", None)
+            raw = getattr(dbapi, "dbapi_connection", None) or getattr(
+                dbapi, "driver_connection", None
+            )
+            cancel = getattr(raw, "cancel", None) if raw is not None else None
+            if callable(cancel):
+                cancel()
+        except Exception:  # noqa: BLE001
+            logger.debug("cancel do driver falhou (best-effort)")
+        try:
+            conn.invalidate()
+        except Exception:  # noqa: BLE001
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                logger.debug("invalidate/close falhou (best-effort)")
 
     def dispose_all(self) -> None:
         """Descarta todos os pools de conexão (encerramento gracioso)."""
@@ -190,4 +252,4 @@ class DatabaseRegistry:
             engine.dispose()
 
 
-__all__ = ["DatabaseRegistry", "ReadOnlyViolationError"]
+__all__ = ["DatabaseRegistry", "QueryTimeoutError", "ReadOnlyViolationError"]

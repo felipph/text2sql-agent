@@ -65,10 +65,14 @@ def needs_duckdb(table_config: TableConfig, sql: str) -> bool:
 class DuckDBSession:
     """Sessão DuckDB in-memory efêmera para materialização por turno."""
 
-    def __init__(self) -> None:
-        self._conn: duckdb.DuckDBPyConnection = duckdb.connect(database=":memory:")
+    def __init__(self, database: str = ":memory:") -> None:
+        self._conn: duckdb.DuckDBPyConnection = duckdb.connect(database=database)
         self._materialized: set[str] = set()
-        logger.debug("DuckDBSession criada (in-memory)")
+        self._result_seq: int = 0
+        if database == ":memory:":
+            logger.debug("DuckDBSession criada (in-memory)")
+        else:
+            logger.debug("DuckDBSession criada ({})", database)
 
     # ------------------------------------------------------------------ #
     # Materialização
@@ -213,6 +217,27 @@ class DuckDBSession:
                     break
             types.append(f'"{col}" {col_type}')
         return ", ".join(types)
+
+    def store_result_rows(self, rows: list[dict[str, Any]]) -> str:
+        """Persiste linhas completas de um resultado truncado; retorna ref ``duckdb://...``."""
+        self._result_seq += 1
+        table_name = f"result_{self._result_seq}"
+        if not rows:
+            self._conn.execute(
+                f'CREATE TABLE "{table_name}" (placeholder VARCHAR)'
+            )
+        else:
+            columns = list(rows[0].keys())
+            col_defs = ", ".join(f'"{c}" VARCHAR' for c in columns)
+            self._conn.execute(f'CREATE TABLE "{table_name}" ({col_defs})')
+            placeholders = ", ".join(["?"] * len(columns))
+            col_list = ", ".join(f'"{c}"' for c in columns)
+            values = [tuple(row.get(c) for c in columns) for row in rows]
+            self._conn.executemany(
+                f'INSERT INTO "{table_name}" ({col_list}) VALUES ({placeholders})',
+                values,
+            )
+        return f"duckdb://{table_name}"
 
     # ------------------------------------------------------------------ #
     # Execução analítica
