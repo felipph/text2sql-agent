@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from txt2sql.artifacts import ShardBinding, ShardRouting
 from txt2sql.config import AgentConfig, ShardResult, TableConfig
@@ -176,12 +177,14 @@ def resolve_routing(
     *,
     extractors: dict[str, Callable[[str], list[str]]] | None = None,
     extra_text: str | None = None,
+    registry: Any | None = None,
 ) -> ShardRouting | ClarifyNeeded:
     """Resolve shard bindings for sharded tables touched by the intent.
 
     resolvers: optional map table_id -> callable(discriminator) -> ShardResult
     extractors: optional map table_id -> callable(text) -> list[str] (fallback)
     If omitted, load from ``ShardingConfig`` on each table.
+    registry: se fornecido, valida ``database_id`` via ``has_database``.
     """
     touched = _touched_table_ids(intent_plan)
     if not touched:
@@ -240,6 +243,16 @@ def resolve_routing(
 
         for value in values:
             result = resolve_fn(value)
+            if not isinstance(result, ShardResult):
+                raise TypeError(
+                    f"Resolver de {table.id!r} deve retornar ShardResult, "
+                    f"retornou {type(result).__name__}."
+                )
+            if registry is not None and not registry.has_database(result.database_id):
+                raise ValueError(
+                    f"Resolver de {table.id!r} retornou database_id inexistente: "
+                    f"{result.database_id!r}."
+                )
             all_bindings.append(
                 ShardBinding(
                     table_id=table.id,

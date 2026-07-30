@@ -1,8 +1,8 @@
 """Smoke test funcional (sem LLM) das camadas de dados da lib txt2sql.
 
 Usa SQLite in-memory compartilhado para exercitar: load_config, DatabaseRegistry,
-guardrail read-only, SchemaLoader (discovery + declarativo), ShardResolver e a
-camada DuckDB (materialização + reescrita + execução analítica).
+guardrail read-only, SchemaLoader (discovery + declarativo), resolve_routing e a
+camada DuckDB (materialização + execução analítica).
 """
 
 from __future__ import annotations
@@ -11,24 +11,22 @@ import sqlite3
 import tempfile
 from pathlib import Path
 
-from sqlalchemy import text
-
 from txt2sql.config import (
     AgentConfig,
     ColumnConfig,
     DatabaseConfig,
     DuckDBConfig,
     ShardingConfig,
-    ShardResult,
     TableConfig,
     load_config,
 )
-from txt2sql.db.duckdb_layer import DuckDBSession, needs_duckdb
+from txt2sql.db.duckdb_layer import DuckDBSession
 from txt2sql.db.registry import DatabaseRegistry
 from txt2sql.db.schema import SchemaLoader
-from txt2sql.db.shard import ShardResolver
 from txt2sql.guardrail import ReadOnlyViolationError, validate_sql
+from txt2sql.intent import FilterClause, IntentPlan, MetricClause
 from txt2sql.prompts import Txt2SqlPromptBuilder
+from txt2sql.shard_routing import ClarifyNeeded, resolve_routing
 
 FAILS = 0
 
@@ -174,25 +172,44 @@ cfg3 = AgentConfig(
     ],
 )
 reg3 = DatabaseRegistry(cfg3)
-resolver = ShardResolver(cfg3, reg3)
-res = resolver.resolve("recebiveis", "12.345.678/0001-90")
-check("resolve CNPJ prefixo 123 -> db_shard_1", res.database_id == "db_shard_1")
-check("resolve nome físico recebiveis_123", res.table_name == "recebiveis_123")
-res2 = resolver.resolve("recebiveis", "40000000000100")
-check("resolve CNPJ prefixo 400 -> db_shard_2", res2.database_id == "db_shard_2")
-# fan-out proibido: valor vazio deve falhar
-try:
-    resolver.resolve("recebiveis", "")
-    check("discriminador vazio é rejeitado (sem fan-out)", False)
-except ValueError:
-    check("discriminador vazio é rejeitado (sem fan-out)", True)
-
-# tool LangChain
-cache: dict = {}
-tool = resolver.build_tool(cache=cache)
-out = tool.invoke({"table_id": "recebiveis", "discriminator_value": "12345678000190"})
-check("StructuredTool resolve_shard retorna JSON", '"database_id"' in out)
-check("tool preenche cache", len(cache) == 1)
+plan_one = IntentPlan(
+    filters=[
+        FilterClause(
+            table_id="recebiveis",
+            column_id="cnpj",
+            op="eq",
+            value="12.345.678/0001-90",
+        )
+    ],
+    metrics=[MetricClause(table_id="recebiveis", column_id="valor", agg="sum")],
+)
+routing = resolve_routing(plan_one, cfg3, registry=reg3)
+check("resolve_routing mode single", routing.mode == "single")
+check("resolve CNPJ prefixo 123 -> db_shard_1", routing.bindings[0].database_id == "db_shard_1")
+check(
+    "resolve nome físico recebiveis_123",
+    routing.bindings[0].physical_table == "recebiveis_123",
+)
+plan_two = IntentPlan(
+    filters=[
+        FilterClause(
+            table_id="recebiveis",
+            column_id="cnpj",
+            op="eq",
+            value="40000000000100",
+        )
+    ],
+)
+routing2 = resolve_routing(plan_two, cfg3, registry=reg3)
+check("resolve CNPJ prefixo 400 -> db_shard_2", routing2.bindings[0].database_id == "db_shard_2")
+plan_missing = IntentPlan(
+    metrics=[MetricClause(table_id="recebiveis", column_id="valor", agg="sum")],
+)
+out_clarify = resolve_routing(plan_missing, cfg3, registry=reg3)
+check(
+    "discriminador ausente pede clarificação (sem fan-out)",
+    isinstance(out_clarify, ClarifyNeeded),
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -205,8 +222,6 @@ duck_table = TableConfig(
     name="recebiveis_001",
     duckdb=DuckDBConfig(enabled=True, trigger="aggregation", fetch_limit=1000),
 )
-check("needs_duckdb True em GROUP BY", needs_duckdb(duck_table, "SELECT cnpj, SUM(valor) FROM recebiveis_001 GROUP BY cnpj"))
-check("needs_duckdb False em SELECT simples", not needs_duckdb(duck_table, "SELECT cnpj FROM recebiveis_001"))
 
 session = DuckDBSession()
 session.materialize(duck_table, reg3.get_engine("db_shard_1"), physical_name="recebiveis_001")

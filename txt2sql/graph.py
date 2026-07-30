@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import tempfile
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -27,21 +26,25 @@ from langgraph.types import interrupt
 from loguru import logger
 from pydantic import BaseModel
 
+from txt2sql.analytical_planning import (
+    GateDecision,
+    MaterializationCheck,
+    build_materialization_plan,
+    check_materialization_ready,
+    run_sufficiency_gate,
+)
 from txt2sql.artifacts import (
     Budget,
     DuckDBCatalog,
-    DuckDBTableInfo,
     ExecutionResult,
     MaterializationPlan,
-    MaterializationStep,
-    ShardBinding,
     ShardRouting,
     SQLPlan,
     VerifyDecision,
 )
-from txt2sql.config import AgentConfig, TableConfig
+from txt2sql.config import AgentConfig
 from txt2sql.db.duckdb_layer import DuckDBSession
-from txt2sql.db.fan_in import build_in_filter, fan_in
+from txt2sql.db.materialize import materialize_tables
 from txt2sql.db.registry import DatabaseRegistry, QueryTimeoutError
 from txt2sql.db.schema import SchemaLoader
 from txt2sql.db.session_store import DuckDBSessionStore
@@ -51,38 +54,19 @@ from txt2sql.middleware import compact_result, result_from_rejection, result_fro
 from txt2sql.path_routing import route_execution
 from txt2sql.policy import check_sql_plan
 from txt2sql.prompts import Txt2SqlPromptBuilder
-from txt2sql.query_routing import extract_table_names
 from txt2sql.shard_routing import (
     ClarifyNeeded,
     ensure_discriminator_filters,
     missing_discriminator_filter_errors,
     resolve_routing,
 )
-from txt2sql.sufficiency import (
-    SufficiencyDecision,
-    build_deterministic_mat_plan,
-    evaluate_sufficiency,
-    intent_table_ids,
-)
+from txt2sql.sufficiency import SufficiencyDecision, intent_table_ids
 
 MAX_INTENT_RETRIES = 2
 CLARIFICATION_EXHAUSTED = (
     "Não consegui obter esclarecimentos suficientes para continuar. "
     "Reformule a pergunta com todos os detalhes necessários numa única mensagem."
 )
-
-
-class GateDecision(BaseModel):
-    """Decisão do sufficiency_gate: reutilizar catálogo ou refresh."""
-
-    action: Literal["reuse", "refresh"] = "refresh"
-
-
-class MaterializationCheck(BaseModel):
-    """Decisão pós-materialize: catálogo pronto para SQL analítico."""
-
-    ready: bool = True
-    reason: str = ""
 
 
 class GraphState(MessagesState):
@@ -192,30 +176,6 @@ def _sufficiency_decision(state: GraphState) -> SufficiencyDecision | None:
         return None
     return _coerce_model(raw, SufficiencyDecision)
 
-
-def _table_ids_from_mat_plan(
-    mat_plan: MaterializationPlan,
-    agent_config: AgentConfig,
-    dialect: str | None,
-) -> set[str]:
-    """Table ids citados em target_table / source_query do plano de materialização."""
-    ids: set[str] = set()
-    by_name: dict[str, str] = {}
-    for table in agent_config.tables:
-        by_name[table.id.lower()] = table.id
-        by_name[table.name.lower()] = table.id
-        by_name[table.qualified_name.lower()] = table.id
-
-    for step in mat_plan.steps:
-        target = (step.target_table or "").lower()
-        if target in by_name:
-            ids.add(by_name[target])
-        for name in extract_table_names(step.source_query or "", dialect):
-            if name in by_name:
-                ids.add(by_name[name])
-    return ids
-
-
 def _last_human_text(state: dict[str, Any]) -> str:
     """Conteúdo da última HumanMessage (para fallback de discriminador)."""
     for msg in reversed(state.get("messages") or []):
@@ -225,77 +185,6 @@ def _last_human_text(state: dict[str, Any]) -> str:
                 return content
             return str(content or "")
     return ""
-
-
-def _resolve_step_table(
-    step: MaterializationStep,
-    *,
-    shard: ShardRouting,
-    intent: IntentPlan,
-    agent_config: AgentConfig,
-) -> TableConfig:
-    """Resolve a :class:`TableConfig` lógica para um passo de materialização.
-
-    O LLM pode inventar ``target_table`` (ex.: ``recebiveis_filtered_…``). O nome
-    DuckDB efetivo é sempre ``table.id``; este helper só descobre *qual* tabela
-    lógica materializar.
-
-    Prioridade: binding explícito do step → ``target_table`` exato → prefixo do
-    nome inventado → binding único do shard → único table_id do intent.
-    """
-    if step.shard_binding is not None:
-        table = agent_config.try_get_table(step.shard_binding.table_id)
-        if table is not None:
-            return table
-
-    table = agent_config.try_get_table(step.target_table)
-    if table is not None:
-        return table
-
-    target_l = (step.target_table or "").lower()
-    if target_l:
-        for candidate in agent_config.tables:
-            if target_l.startswith((candidate.id.lower(), candidate.name.lower())):
-                return candidate
-
-    if len(shard.bindings) == 1:
-        table = agent_config.try_get_table(shard.bindings[0].table_id)
-        if table is not None:
-            return table
-
-    intent_ids = sorted(_intent_table_ids(intent))
-    if len(intent_ids) == 1:
-        table = agent_config.try_get_table(intent_ids[0])
-        if table is not None:
-            return table
-
-    known = ", ".join(sorted(t.id for t in agent_config.tables)) or "(nenhuma)"
-    raise KeyError(
-        f"Não foi possível mapear target_table={step.target_table!r} a um "
-        f"table_id conhecido. IDs: {known}"
-    )
-
-
-def _bindings_for_table(
-    table: TableConfig,
-    shard: ShardRouting,
-    step: MaterializationStep | None,
-) -> list[ShardBinding]:
-    """Bindings de shard para ``table`` — nunca usa binding de outra tabela."""
-    if not table.is_sharded:
-        return []
-    if step is not None and step.shard_bindings:
-        return [b for b in step.shard_bindings if b.table_id == table.id]
-    matching = [b for b in shard.bindings if b.table_id == table.id]
-    if matching:
-        return matching
-    if (
-        step is not None
-        and step.shard_binding is not None
-        and step.shard_binding.table_id == table.id
-    ):
-        return [step.shard_binding]
-    return []
 
 
 def _append_provenance_footer(
@@ -573,6 +462,10 @@ def build_graph(
 
         budget = budget.model_copy(update={"clarification_count": budget.clarification_count + 1})
 
+        text = question
+        if options:
+            text = question + "\nOpções: " + ", ".join(str(o) for o in options)
+
         if has_checkpointer:
             answer = interrupt(
                 {
@@ -581,17 +474,18 @@ def build_graph(
                     "options": options,
                 }
             )
-            # Resume não passa por init_state — rehidrata UntrackedValue
+            # Resume não passa por init_state — rehidrata UntrackedValue.
+            # Persiste pergunta+resposta no histórico (interrupt sozinho não grava AIMessage).
             return {
-                "messages": [HumanMessage(content=str(answer))],
+                "messages": [
+                    AIMessage(content=text),
+                    HumanMessage(content=str(answer)),
+                ],
                 "budget": budget,
                 "final_answer": None,
                 "duckdb_session": _ensure_duckdb_session(state, config),
             }
 
-        text = question
-        if options:
-            text = question + "\nOpções: " + ", ".join(str(o) for o in options)
         return {
             "messages": [AIMessage(content=text)],
             "budget": budget,
@@ -605,7 +499,12 @@ def build_graph(
 
     def resolve_and_route(state: GraphState) -> dict[str, Any]:
         plan = _coerce_intent_plan(state.get("intent_plan"))
-        routing_result = resolve_routing(plan, config, extra_text=_last_human_text(state))
+        routing_result = resolve_routing(
+            plan,
+            config,
+            extra_text=_last_human_text(state),
+            registry=registry,
+        )
         if isinstance(routing_result, ClarifyNeeded):
             clarify = plan.model_copy(
                 update={
@@ -695,16 +594,10 @@ def build_graph(
         catalog = _catalog(state)
         budget = _budget(state)
         session = _ensure_duckdb_session(state, config)
-        if budget.exhausted("gate_visits"):
-            return {
-                "gate_action": "refresh",
-                "budget": budget,
-                "duckdb_session": session,
-            }
         plan = _coerce_intent_plan(state.get("intent_plan"))
         shard = _shard_routing(state)
-        decision = evaluate_sufficiency(plan, shard, catalog, agent_config, dialect=default_dialect)
-        if decision.action == "unknown":
+
+        def _gate_llm_fallback(decision: SufficiencyDecision) -> Literal["reuse", "refresh"]:
             context = (
                 "Decida se o DuckDBCatalog cobre o IntentPlan (reuse) ou precisa refresh.\n"
                 f"Diagnóstico determinístico:\n{_dump_json(decision.reasons)}\n"
@@ -717,19 +610,21 @@ def build_graph(
                 gate = GateDecision.model_validate(gate)
             elif not isinstance(gate, GateDecision):
                 gate = GateDecision(action=getattr(gate, "action", "refresh"))
-            action: Literal["reuse", "refresh"] = (
-                gate.action if gate.action in {"reuse", "refresh"} else "refresh"
-            )
-            decision = SufficiencyDecision(
-                action=action,
-                gaps=decision.gaps,
-                reasons=decision.reasons,
-            )
-        gate_action = decision.action if decision.action in {"reuse", "refresh"} else "refresh"
+            return gate.action if gate.action in {"reuse", "refresh"} else "refresh"
+
+        gate_action, decision, budget = run_sufficiency_gate(
+            intent=plan,
+            shard=shard,
+            catalog=catalog,
+            config=agent_config,
+            budget=budget,
+            dialect=default_dialect,
+            llm_fallback=_gate_llm_fallback,
+        )
         return {
             "gate_action": gate_action,
             "sufficiency_decision": decision,
-            "budget": budget.model_copy(update={"gate_visits": budget.gate_visits + 1}),
+            "budget": budget,
             "duckdb_session": session,
         }
 
@@ -738,29 +633,35 @@ def build_graph(
         shard = _shard_routing(state)
         catalog = _catalog(state)
         decision = _sufficiency_decision(state)
-        if decision is not None:
-            det = build_deterministic_mat_plan(decision, catalog, config)
-            if det is not None:
-                return {"materialization_plan": det}
-        logical_ids = sorted(_intent_table_ids(plan)) or [t.id for t in config.tables]
-        gaps_blob = ""
-        if decision is not None and decision.gaps:
-            gaps_blob = f"Gaps (materializar só o necessário):\n{_dump_json(decision.gaps)}\n"
-        context = (
-            "Gere MaterializationPlan com extracts filtrados (sem agregação pesada na origem).\n"
-            "IMPORTANTE: target_table DEVE ser exatamente um table_id lógico da config "
-            f"({logical_ids}). Não invente nomes como 'recebiveis_filtered_…'.\n"
-            f"{gaps_blob}"
-            f"IntentPlan:\n{_dump_json(plan, indent=2)}\n"
-            f"ShardRouting:\n{_dump_json(shard, indent=2)}"
+
+        def _mat_llm_fallback() -> MaterializationPlan:
+            logical_ids = sorted(_intent_table_ids(plan)) or [t.id for t in config.tables]
+            gaps_blob = ""
+            if decision is not None and decision.gaps:
+                gaps_blob = f"Gaps (materializar só o necessário):\n{_dump_json(decision.gaps)}\n"
+            context = (
+                "Gere MaterializationPlan com extracts filtrados (sem agregação pesada na origem).\n"
+                "IMPORTANTE: target_table DEVE ser exatamente um table_id lógico da config "
+                f"({logical_ids}). Não invente nomes como 'recebiveis_filtered_…'.\n"
+                f"{gaps_blob}"
+                f"IntentPlan:\n{_dump_json(plan, indent=2)}\n"
+                f"ShardRouting:\n{_dump_json(shard, indent=2)}"
+            )
+            mat = mat_llm.invoke([SystemMessage(content=context)])
+            if isinstance(mat, MaterializationPlan):
+                return mat
+            if isinstance(mat, dict):
+                return MaterializationPlan.model_validate(mat)
+            return MaterializationPlan.model_validate(mat)
+
+        mat = build_materialization_plan(
+            intent=plan,
+            shard=shard,
+            catalog=catalog,
+            config=agent_config,
+            decision=decision,
+            llm_fallback=_mat_llm_fallback,
         )
-        mat = mat_llm.invoke([SystemMessage(content=context)])
-        if isinstance(mat, MaterializationPlan):
-            pass
-        elif isinstance(mat, dict):
-            mat = MaterializationPlan.model_validate(mat)
-        else:
-            mat = MaterializationPlan.model_validate(mat)
         return {"materialization_plan": mat}
 
     def materialize(state: GraphState, config: RunnableConfig) -> dict[str, Any]:
@@ -773,210 +674,77 @@ def build_graph(
         budget = _budget(state)
         catalog = _catalog(state)
         session = _ensure_duckdb_session(state, config)
-        total_rows = 0
-        last_rows: list[dict[str, Any]] = []
         intent = _coerce_intent_plan(state.get("intent_plan"))
-        source_queries_by_table: dict[str, list[str]] = {}
 
-        def _upsert_catalog(logical_name: str, rows: int, queries: list[str]) -> None:
-            nonlocal catalog
-            info = DuckDBTableInfo(
-                name=logical_name,
-                row_count=rows,
-                source_queries=queries,
-                shard_bindings=[b for b in shard.bindings if b.table_id == logical_name],
-                materialized_at=datetime.now(UTC),
-            )
-            catalog = DuckDBCatalog(
-                tables=[t for t in catalog.tables if t.name != logical_name] + [info]
-            )
-
-        def _materialize_one(
-            table: TableConfig,
-            step: MaterializationStep | None,
-        ) -> str | None:
-            """Materializa uma tabela. Retorna mensagem de erro ou None."""
-            nonlocal total_rows, last_rows
-            logical_name = table.id
-            bindings = _bindings_for_table(table, shard, step)
-            queries = (
-                [step.source_query]
-                if step is not None and step.source_query
-                else source_queries_by_table.get(logical_name, [])
-            )
-
-            if table.is_sharded and len(bindings) >= 2:
-                result = fan_in(
-                    session=session,
-                    table=table,
-                    registry=registry,
-                    bindings=bindings,
-                )
-                total_rows = result.row_count
-                last_rows = session.execute(f'SELECT * FROM "{logical_name}" LIMIT 5')
-                source_queries_by_table[logical_name] = queries or [
-                    f"fan-in:{len(bindings)} bindings"
-                ]
-                _upsert_catalog(logical_name, total_rows, source_queries_by_table[logical_name])
-                return None
-
-            if table.is_sharded and len(bindings) == 1:
-                binding = bindings[0]
-                source_engine = registry.get_engine(binding.database_id)
-                disc_col = table.sharding.discriminator_column if table.sharding else None
-                filt = (
-                    build_in_filter(disc_col, [binding.discriminator_value]) if disc_col else None
-                )
-                session.materialize(
-                    table,
-                    source_engine,
-                    physical_name=binding.physical_table,
-                    filter_sql=filt,
-                    replace=True,
-                )
-                last_rows = session.execute(f'SELECT * FROM "{logical_name}" LIMIT 5')
-                count_rows = session.execute(f'SELECT COUNT(*) AS n FROM "{logical_name}"')
-                total_rows = int(count_rows[0]["n"]) if count_rows else len(last_rows)
-                source_queries_by_table[logical_name] = queries or [
-                    f"SELECT * FROM {binding.physical_table}"
-                ]
-                _upsert_catalog(logical_name, total_rows, source_queries_by_table[logical_name])
-                return None
-
-            # Não-shardada (ou shardada sem binding — extract via SQL do plano)
-            if step is not None and step.source_query.strip():
-                extract_sql = step.source_query
-            else:
-                extract_sql = f"SELECT * FROM {table.qualified_name}"
-
-            extract_plan = SQLPlan(
-                sql=extract_sql,
-                dialect=default_dialect or "postgres",
-            )
-            decision = check_sql_plan(
-                extract_plan,
-                config=agent_config,
-                shard_routing=shard,
-                path="analytical",
-                context="source_extract",
-                dialect=default_dialect,
-                max_rows=budget.max_rows_per_extract,
-            )
-            if decision.status == "rejected":
-                return decision.error or "rejeitado"
-            db_id = table.database
-            try:
-                rows = registry.execute(db_id, decision.sql)
-            except QueryTimeoutError as err:
-                return str(err)
-            last_rows = rows
-            total_rows = len(rows)
-            _load_rows_into_duckdb(session, logical_name, rows, replace=True)
-            source_queries_by_table[logical_name] = [decision.sql]
-            _upsert_catalog(logical_name, total_rows, [decision.sql])
-            return None
-
-        planned_ids: list[str] = []
-        for step in mat_plan.steps:
-            try:
-                table = _resolve_step_table(
-                    step, shard=shard, intent=intent, agent_config=agent_config
-                )
-            except KeyError as err:
-                return {
-                    "duckdb_session": session,
-                    "last_result": result_from_rejection(str(err)),
-                }
-            err = _materialize_one(table, step)
-            if err is not None:
-                if "timeout" in err.lower():
-                    payload = result_from_timeout(err)
-                else:
-                    payload = result_from_rejection(err)
-                return {
-                    "duckdb_session": session,
-                    "last_result": payload,
-                }
-            planned_ids.append(table.id)
-
-        # Completa tabelas do intent / plano ausentes (ex.: JOIN com clientes)
-        needed = _intent_table_ids(intent) | _table_ids_from_mat_plan(
-            mat_plan, agent_config, default_dialect
+        outcome = materialize_tables(
+            mat_plan=mat_plan,
+            intent=intent,
+            shard=shard,
+            catalog=catalog,
+            session=session,
+            registry=registry,
+            config=agent_config,
+            max_rows_per_extract=budget.max_rows_per_extract,
+            dialect=default_dialect,
         )
-        for tid in sorted(needed):
-            if tid in planned_ids:
-                continue
-            if any(t.name == tid for t in catalog.tables):
-                continue
-            table = agent_config.try_get_table(tid)
-            if table is None or not table.uses_duckdb:
-                continue
-            err = _materialize_one(table, step=None)
-            if err is not None:
-                if "timeout" in err.lower():
-                    payload = result_from_timeout(err)
-                else:
-                    payload = result_from_rejection(err)
-                return {
-                    "duckdb_session": session,
-                    "last_result": payload,
-                }
+        if outcome.error_kind != "ok":
+            if outcome.error_kind == "timeout":
+                payload = result_from_timeout(outcome.error or "timeout")
+            else:
+                payload = result_from_rejection(outcome.error or "rejeitado")
+            return {
+                "duckdb_session": session,
+                "last_result": payload,
+            }
 
         mat_budget = budget.model_copy(update={"mat_loop_count": budget.mat_loop_count + 1})
-        result = _compact_from_state(state, last_rows, mat_budget, session=session)
+        result = _compact_from_state(state, outcome.sample_rows, mat_budget, session=session)
         return {
             "duckdb_session": session,
-            "duckdb_catalog": catalog,
+            "duckdb_catalog": outcome.catalog,
             "budget": mat_budget,
             "last_result": result,
         }
 
     def check_materialization(state: GraphState) -> dict[str, Any]:
         budget = _budget(state)
-        if budget.exhausted("mat_loop_count"):
-            return {"mat_ready": True, "partial": True}
-
         last = _last_result(state)
         last_status = last.status if last is not None else "ok"
-        if last_status in {"rejected", "timeout", "error"}:
-            return {"mat_ready": False, "partial": False}
-
         plan = _coerce_intent_plan(state.get("intent_plan"))
         catalog = _catalog(state)
         shard = _shard_routing(state)
-        decision = evaluate_sufficiency(plan, shard, catalog, agent_config, dialect=default_dialect)
-        if decision.action == "reuse":
-            return {
-                "mat_ready": True,
-                "partial": False,
-                "sufficiency_decision": decision,
-            }
-        if decision.action == "refresh":
-            return {
-                "mat_ready": False,
-                "partial": False,
-                "sufficiency_decision": decision,
-            }
 
-        context = (
-            "Avalie se o DuckDBCatalog cobre o IntentPlan para gerar SQL analítico.\n"
-            f"Diagnóstico determinístico:\n{_dump_json(decision.reasons)}\n"
-            f"IntentPlan:\n{_dump_json(plan, indent=2)}\n"
-            f"Catalog:\n{_dump_json(catalog, indent=2)}"
-        )
-        check = mat_check_llm.invoke([SystemMessage(content=context)])
-        if isinstance(check, dict):
-            check = MaterializationCheck.model_validate(check)
-        elif not isinstance(check, MaterializationCheck):
-            check = MaterializationCheck(
-                ready=bool(getattr(check, "ready", True)),
-                reason=str(getattr(check, "reason", "")),
+        def _mat_check_llm_fallback(decision: SufficiencyDecision) -> bool:
+            context = (
+                "Avalie se o DuckDBCatalog cobre o IntentPlan para gerar SQL analítico.\n"
+                f"Diagnóstico determinístico:\n{_dump_json(decision.reasons)}\n"
+                f"IntentPlan:\n{_dump_json(plan, indent=2)}\n"
+                f"Catalog:\n{_dump_json(catalog, indent=2)}"
             )
-        return {
-            "mat_ready": check.ready,
-            "partial": False,
-            "sufficiency_decision": decision,
-        }
+            check = mat_check_llm.invoke([SystemMessage(content=context)])
+            if isinstance(check, dict):
+                check = MaterializationCheck.model_validate(check)
+            elif not isinstance(check, MaterializationCheck):
+                check = MaterializationCheck(
+                    ready=bool(getattr(check, "ready", True)),
+                    reason=str(getattr(check, "reason", "")),
+                )
+            return check.ready
+
+        mat_ready, partial, decision = check_materialization_ready(
+            intent=plan,
+            shard=shard,
+            catalog=catalog,
+            config=agent_config,
+            budget=budget,
+            last_status=last_status,
+            dialect=default_dialect,
+            llm_fallback=_mat_check_llm_fallback,
+        )
+        out: dict[str, Any] = {"mat_ready": mat_ready, "partial": partial}
+        if decision is not None:
+            out["sufficiency_decision"] = decision
+        return out
 
     def generate_analytical_sql(state: GraphState) -> dict[str, Any]:
         plan = _coerce_intent_plan(state.get("intent_plan"))
@@ -1239,35 +1007,4 @@ def build_graph(
     return compiled
 
 
-def _load_rows_into_duckdb(
-    session: DuckDBSession,
-    table_name: str,
-    rows: list[dict[str, Any]],
-    *,
-    replace: bool = True,
-) -> None:
-    """Carrega linhas dict no DuckDB (MVP — helper local)."""
-    conn = session._conn
-    if replace:
-        conn.execute(f'DROP TABLE IF EXISTS "{table_name}"')
-        session._materialized.discard(table_name)
-
-    if not rows:
-        conn.execute(f'CREATE TABLE IF NOT EXISTS "{table_name}" (placeholder VARCHAR)')
-        session._materialized.add(table_name)
-        return
-
-    columns = list(rows[0].keys())
-    col_defs = ", ".join(f'"{c}" VARCHAR' for c in columns)
-    conn.execute(f'CREATE TABLE "{table_name}" ({col_defs})')
-    placeholders = ", ".join(["?"] * len(columns))
-    col_list = ", ".join(f'"{c}"' for c in columns)
-    values = [tuple(row.get(c) for c in columns) for row in rows]
-    conn.executemany(
-        f'INSERT INTO "{table_name}" ({col_list}) VALUES ({placeholders})',
-        values,
-    )
-    session._materialized.add(table_name)
-
-
-__all__ = ["GateDecision", "GraphState", "MaterializationCheck", "build_graph"]
+__all__ = ["GraphState", "build_graph"]

@@ -251,7 +251,7 @@ def test_s7_analytical_path_recebiveis_offline(monkeypatch: Any) -> None:
         "O total de recebíveis é R$ 175,00.",
     ]
     monkeypatch.setattr(
-        "txt2sql.graph.build_deterministic_mat_plan", lambda *_a, **_k: None
+        "txt2sql.analytical_planning.build_deterministic_mat_plan", lambda *_a, **_k: None
     )
     monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: ScriptedLLM(script))
     agent = build_agent(cfg, checkpointer=MemorySaver())

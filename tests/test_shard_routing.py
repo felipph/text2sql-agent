@@ -1,3 +1,5 @@
+import pytest
+
 from txt2sql.artifacts import ShardBinding, ShardRouting
 from txt2sql.config import (
     AgentConfig,
@@ -196,3 +198,40 @@ def test_ensure_discriminator_filters_injects_in_clause() -> None:
     assert len(enriched.filters) == 1
     assert enriched.filters[0].op == "in"
     assert set(enriched.filters[0].value) == {"65410433218196", "74778161849593"}
+
+
+def test_resolve_routing_rejects_unknown_database_id() -> None:
+    class FakeReg:
+        def has_database(self, db_id: str) -> bool:
+            return db_id == "db_ok"
+
+    def bad_resolver(value: str) -> ShardResult:
+        return ShardResult(database_id="db_missing", table_name="recebiveis_x")
+
+    plan = IntentPlan(
+        filters=[FilterClause(table_id="recebiveis", column_id="cnpj", op="eq", value="1")],
+        metrics=[MetricClause(table_id="recebiveis", column_id="valor", agg="sum")],
+    )
+    with pytest.raises(ValueError, match="database_id inexistente"):
+        resolve_routing(
+            plan,
+            _cfg_sharded(),
+            resolvers={"recebiveis": bad_resolver},
+            registry=FakeReg(),
+        )
+
+
+def test_resolve_routing_skips_db_check_without_registry() -> None:
+    def odd_resolver(value: str) -> ShardResult:
+        return ShardResult(database_id="not_in_config", table_name="t")
+
+    plan = IntentPlan(
+        filters=[FilterClause(table_id="recebiveis", column_id="cnpj", op="eq", value="1")],
+    )
+    out = resolve_routing(
+        plan,
+        _cfg_sharded(),
+        resolvers={"recebiveis": odd_resolver},
+    )
+    assert isinstance(out, ShardRouting)
+    assert out.bindings[0].database_id == "not_in_config"

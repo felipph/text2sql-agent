@@ -263,7 +263,7 @@ def test_analytical_path_force_analytical_reaches_answer(monkeypatch: Any) -> No
     # se o gate já montar o plano. Preferimos script sem GateDecision.
     monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: ScriptedLLM(script))
     # Força path LLM de materialização para manter o extract tipado do script
-    monkeypatch.setattr("txt2sql.graph.build_deterministic_mat_plan", lambda *_a, **_k: None)
+    monkeypatch.setattr("txt2sql.analytical_planning.build_deterministic_mat_plan", lambda *_a, **_k: None)
     agent = build_agent(cfg, checkpointer=MemorySaver())
     assert "check_materialization" in agent.get_graph().nodes
     result = agent.invoke(
@@ -522,7 +522,7 @@ def test_catalog_preserved_across_turns(monkeypatch: Any) -> None:
         VerifyDecision(action="answer", reason="ok"),
         "175 again.",
     ]
-    monkeypatch.setattr("txt2sql.graph.build_deterministic_mat_plan", lambda *_a, **_k: None)
+    monkeypatch.setattr("txt2sql.analytical_planning.build_deterministic_mat_plan", lambda *_a, **_k: None)
     monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: ScriptedLLM(script))
     agent = build_agent(cfg, checkpointer=MemorySaver())
     thread_cfg = {"configurable": {"thread_id": "catalog-reuse"}}
@@ -545,7 +545,7 @@ def test_catalog_preserved_across_turns(monkeypatch: Any) -> None:
 def test_resolve_step_table_invented_target_maps_to_logical() -> None:
     """LLM pode inventar target_table; resolve para table_id lógico."""
     from txt2sql.artifacts import ShardBinding, ShardRouting
-    from txt2sql.graph import _resolve_step_table
+    from txt2sql.db.materialize import _resolve_step_table
 
     cfg = _cfg_recebiveis_analytical()
     intent = IntentPlan(
@@ -605,7 +605,7 @@ def test_analytical_invented_target_table_still_materializes(monkeypatch: Any) -
         VerifyDecision(action="answer", reason="ok"),
         "Total 175.",
     ]
-    monkeypatch.setattr("txt2sql.graph.build_deterministic_mat_plan", lambda *_a, **_k: None)
+    monkeypatch.setattr("txt2sql.analytical_planning.build_deterministic_mat_plan", lambda *_a, **_k: None)
     monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: ScriptedLLM(script))
     agent = build_agent(cfg, checkpointer=MemorySaver())
     result = agent.invoke(
@@ -711,7 +711,7 @@ def test_analytical_multi_shard_fan_in_sums_all_cnpjs(monkeypatch: Any) -> None:
         VerifyDecision(action="answer", reason="ok"),
         "Total 4121.55",
     ]
-    monkeypatch.setattr("txt2sql.graph.build_deterministic_mat_plan", lambda *_a, **_k: None)
+    monkeypatch.setattr("txt2sql.analytical_planning.build_deterministic_mat_plan", lambda *_a, **_k: None)
     monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: ScriptedLLM(script))
     agent = build_agent(cfg, checkpointer=MemorySaver())
     result = agent.invoke(
@@ -755,10 +755,7 @@ def test_analytical_join_clientes_materialized_in_duckdb(monkeypatch: Any) -> No
                 mode="replace",
             ),
             MaterializationStep(
-                source_query=(
-                    "SELECT cnpj, razao_social FROM clientes "
-                    "WHERE cnpj IN ('65410433218196', '74778161849593')"
-                ),
+                source_query="SELECT cnpj, razao_social FROM clientes",
                 target_table="clientes",
                 mode="replace",
             ),
@@ -1010,8 +1007,8 @@ def test_sufficiency_gate_llm_fallback_on_unknown(monkeypatch: Any) -> None:
         return SufficiencyDecision(action="reuse")
 
     monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: llm)
-    monkeypatch.setattr("txt2sql.graph.evaluate_sufficiency", _fake_eval)
-    monkeypatch.setattr("txt2sql.graph.build_deterministic_mat_plan", lambda *_a, **_k: None)
+    monkeypatch.setattr("txt2sql.analytical_planning.evaluate_sufficiency", _fake_eval)
+    monkeypatch.setattr("txt2sql.analytical_planning.build_deterministic_mat_plan", lambda *_a, **_k: None)
     agent = build_agent(cfg, checkpointer=MemorySaver())
     result = agent.invoke(
         {"messages": [HumanMessage(content="total?")]},
@@ -1093,7 +1090,7 @@ def test_resume_after_clarification_rehydrates_duckdb_on_reuse(
         vd,
     ]
     monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: _LLM(script))
-    monkeypatch.setattr("txt2sql.graph.build_deterministic_mat_plan", lambda *_a, **_k: None)
+    monkeypatch.setattr("txt2sql.analytical_planning.build_deterministic_mat_plan", lambda *_a, **_k: None)
     agent = build_agent(cfg, checkpointer=MemorySaver())
     thread = {"configurable": {"thread_id": "resume-duckdb-session"}}
 

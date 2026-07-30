@@ -8,6 +8,7 @@ from typing import Any
 from loguru import logger
 from sqlalchemy import inspect
 
+from txt2sql.artifacts import ShardBinding
 from txt2sql.config import TableConfig
 from txt2sql.db.duckdb_layer import DuckDBSession
 from txt2sql.db.registry import DatabaseRegistry
@@ -38,7 +39,7 @@ def fan_in(
     session: DuckDBSession,
     table: TableConfig,
     registry: DatabaseRegistry,
-    bindings: list[Any],  # list[ShardBinding]
+    bindings: list[ShardBinding],
 ) -> FanInResult:
     """Materializa todos os físicos dos bindings no nome lógico da tabela.
 
@@ -50,15 +51,17 @@ def fan_in(
         session: Sessão DuckDB ativa.
         table: Configuração lógica da tabela shardada.
         registry: Registry de engines de banco.
-        bindings: Lista de :class:`~txt2sql.shard_routing.ShardBinding` já
+        bindings: Lista de :class:`~txt2sql.artifacts.ShardBinding` já
             resolvidos (vindos de ``resolve_routing``).
 
     Returns:
         :class:`FanInResult` com ``row_count`` e lista de físicos tocados.
 
     Raises:
-        ValueError: Tabela física ausente em algum shard.
+        ValueError: ``bindings`` vazio ou tabela física ausente em algum shard.
     """
+    if len(bindings) < 1:
+        raise ValueError("bindings não pode ser vazio")
     groups: dict[tuple[str, str], list[str]] = {}
     for binding in bindings:
         key = (binding.database_id, binding.physical_table)

@@ -133,7 +133,7 @@ class SchemaLoader:
         if table.is_sharded:
             lines.append(
                 f"  [SHARDADA] discriminador='{table.sharding.discriminator_column}' — "
-                "use resolve_shard antes de consultar."
+                "informe o valor em filters; o routing resolve o shard."
             )
         lines.append("Colunas:")
         for col in table.columns:
@@ -172,7 +172,7 @@ class SchemaLoader:
         if table.is_sharded:
             lines.append(
                 f"  [SHARDADA] discriminador='{table.sharding.discriminator_column}' — "
-                "use resolve_shard antes de consultar."
+                "informe o valor em filters; o routing resolve o shard."
             )
         lines.append("Colunas:")
         for col in columns:

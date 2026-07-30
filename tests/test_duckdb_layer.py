@@ -157,3 +157,75 @@ def test_materialize_append_and_replace_raise() -> None:
             )
     finally:
         session.close()
+
+
+def test_materialize_with_source_sql_batches(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(duckdb_layer, "BATCH_SIZE", 10)
+    engine = _source_engine_with_rows(25)
+    session = DuckDBSession()
+    try:
+        session.materialize(
+            _table(fetch_limit=100),
+            engine,
+            source_sql="SELECT id, valor FROM origem WHERE id >= 10",
+            replace=True,
+        )
+        rows = session.execute("SELECT COUNT(*) AS c FROM origem_logica")
+        assert rows[0]["c"] == 15
+        total = session.execute("SELECT SUM(valor) AS s FROM origem_logica")
+        assert total[0]["s"] == sum(range(10, 25))
+    finally:
+        session.close()
+
+
+def test_materialize_source_sql_applies_fetch_limit() -> None:
+    engine = _source_engine_with_rows(50)
+    session = DuckDBSession()
+    try:
+        session.materialize(
+            _table(fetch_limit=12),
+            engine,
+            source_sql="SELECT id, valor FROM origem",
+            replace=True,
+        )
+        rows = session.execute("SELECT COUNT(*) AS c FROM origem_logica")
+        assert rows[0]["c"] == 12
+    finally:
+        session.close()
+
+
+def test_materialize_source_sql_rejects_filter_sql() -> None:
+    engine = _source_engine_with_rows(3)
+    session = DuckDBSession()
+    try:
+        with pytest.raises(ValueError, match="source_sql"):
+            session.materialize(
+                _table(),
+                engine,
+                source_sql="SELECT id FROM origem",
+                filter_sql="id > 0",
+            )
+    finally:
+        session.close()
+
+
+def test_load_rows_creates_table() -> None:
+    session = DuckDBSession()
+    try:
+        session.load_rows("t", [{"a": 1}, {"a": 2}], replace=True)
+        assert session.is_materialized("t")
+        assert session.execute('SELECT COUNT(*) AS n FROM "t"')[0]["n"] == 2
+        session.load_rows("t", [{"a": 9}], replace=True)
+        assert session.execute('SELECT COUNT(*) AS n FROM "t"')[0]["n"] == 1
+    finally:
+        session.close()
+
+
+def test_load_rows_empty() -> None:
+    session = DuckDBSession()
+    try:
+        session.load_rows("empty_t", [], replace=True)
+        assert session.is_materialized("empty_t")
+        assert session.execute('SELECT COUNT(*) AS n FROM "empty_t"')[0]["n"] == 0
+    finally:
+        session.close()

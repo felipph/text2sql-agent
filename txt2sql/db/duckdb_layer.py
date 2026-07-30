@@ -25,41 +25,16 @@ from sqlalchemy import Engine, text
 
 from txt2sql.config import TableConfig
 
-# Padrões usados para detectar operações analíticas na query.
-_RE_GROUP_BY = re.compile(r"\bgroup\s+by\b", re.IGNORECASE)
-_RE_ORDER_BY = re.compile(r"\border\s+by\b", re.IGNORECASE)
-_RE_JOIN = re.compile(r"\bjoin\b", re.IGNORECASE)
-_RE_AGG_FUNC = re.compile(
-    r"\b(count|sum|avg|min|max|stddev|variance|median|group_concat|array_agg)\s*\(",
-    re.IGNORECASE,
-)
-
 BATCH_SIZE = 5_000
 
+_RE_LIMIT = re.compile(r"\blimit\b", re.IGNORECASE)
 
-def needs_duckdb(table_config: TableConfig, sql: str) -> bool:
-    """Decide se a query em uma tabela deve ser roteada pelo DuckDB.
 
-    Args:
-        table_config: Configuração da tabela (com o gatilho DuckDB).
-        sql: A query analítica gerada pelo LLM.
-
-    Returns:
-        ``True`` se a tabela usa DuckDB e o gatilho configurado casa com a query.
-    """
-    if not table_config.uses_duckdb:
-        return False
-
-    trigger = table_config.duckdb.trigger
-    if trigger == "always":
-        return True
-    if trigger == "aggregation":
-        return bool(_RE_GROUP_BY.search(sql) or _RE_AGG_FUNC.search(sql))
-    if trigger == "order":
-        return bool(_RE_ORDER_BY.search(sql))
-    if trigger == "join":
-        return bool(_RE_JOIN.search(sql))
-    return False
+def _apply_fetch_limit(select_sql: str, fetch_limit: int) -> str:
+    """Acrescenta LIMIT se a query ainda não tiver cláusula LIMIT."""
+    if _RE_LIMIT.search(select_sql):
+        return select_sql
+    return f"{select_sql.rstrip().rstrip(';')} LIMIT {fetch_limit}"
 
 
 class DuckDBSession:
@@ -88,6 +63,7 @@ class DuckDBSession:
         physical_name: str | None = None,
         filter_sql: str | None = None,
         *,
+        source_sql: str | None = None,
         append: bool = False,
         replace: bool = False,
     ) -> None:
@@ -100,6 +76,8 @@ class DuckDBSession:
                 Se ``None``, usa ``table_config.qualified_name``.
             filter_sql: Cláusula ``WHERE`` opcional (sem a palavra ``WHERE``)
                 para reduzir o volume trazido do banco de origem.
+            source_sql: SELECT completo opcional (extract custom). Mutuamente
+                exclusivo com ``filter_sql``. Ignora ``physical_name``.
             append: Se ``True`` e a tabela lógica já existe, apenas insere linhas.
             replace: Se ``True``, descarta a tabela lógica existente antes de
                 materializar de novo.
@@ -109,6 +87,8 @@ class DuckDBSession:
         """
         if append and replace:
             raise ValueError("append e replace são mutuamente exclusivos")
+        if source_sql is not None and filter_sql is not None:
+            raise ValueError("source_sql e filter_sql são mutuamente exclusivos")
 
         logical_name = table_config.id
         if replace and logical_name in self._materialized:
@@ -121,16 +101,21 @@ class DuckDBSession:
             logger.debug("Tabela {!r} já materializada; pulando", logical_name)
             return
 
-        source_name = physical_name or table_config.qualified_name
         fetch_limit = table_config.duckdb.fetch_limit if table_config.duckdb else 100_000
 
-        where_part = f" WHERE {filter_sql}" if filter_sql else ""
-        select_sql = f"SELECT * FROM {source_name}{where_part} LIMIT {fetch_limit}"
+        if source_sql is not None:
+            select_sql = _apply_fetch_limit(source_sql.strip(), fetch_limit)
+            source_label = "source_sql"
+        else:
+            source_name = physical_name or table_config.qualified_name
+            where_part = f" WHERE {filter_sql}" if filter_sql else ""
+            select_sql = f"SELECT * FROM {source_name}{where_part} LIMIT {fetch_limit}"
+            source_label = source_name
 
         logger.info(
             "Materializando {!r} no DuckDB a partir de {!r} (limit={}, append={})",
             logical_name,
-            source_name,
+            source_label,
             fetch_limit,
             append and already,
         )
@@ -170,6 +155,37 @@ class DuckDBSession:
 
         self._materialized.add(logical_name)
         logger.info("Tabela {!r} materializada com {} linha(s)", logical_name, total_rows)
+
+    def load_rows(
+        self,
+        table_name: str,
+        rows: list[dict[str, Any]],
+        *,
+        replace: bool = True,
+    ) -> None:
+        """Carrega linhas já em memória (dict) numa tabela lógica DuckDB.
+
+        Caminho residual — preferir :meth:`materialize` para extracts da origem.
+        """
+        if replace:
+            self._conn.execute(f'DROP TABLE IF EXISTS "{table_name}"')
+            self._materialized.discard(table_name)
+
+        if not rows:
+            self._conn.execute(
+                f'CREATE TABLE IF NOT EXISTS "{table_name}" (placeholder VARCHAR)'
+            )
+            self._materialized.add(table_name)
+            return
+
+        columns = list(rows[0].keys())
+        values = [tuple(row.get(c) for c in columns) for row in rows]
+        if table_name not in self._materialized:
+            self._conn.execute(
+                f'CREATE TABLE "{table_name}" ({self._infer_schema(columns, values)})'
+            )
+        self._insert_batch(table_name, columns, values)
+        self._materialized.add(table_name)
 
     def _create_empty_table(self, name: str, columns: list[str]) -> None:
         """Cria tabela DuckDB vazia com colunas VARCHAR."""
@@ -270,4 +286,4 @@ class DuckDBSession:
             logger.debug("DuckDBSession fechada (dados do turno descartados)")
 
 
-__all__ = ["DuckDBSession", "needs_duckdb"]
+__all__ = ["DuckDBSession"]

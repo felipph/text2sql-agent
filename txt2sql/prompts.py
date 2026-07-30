@@ -52,8 +52,15 @@ class Txt2SqlPromptBuilder:
             "## Regras do IntentPlan",
             "- status=ready somente quando tabelas, filtros e métricas estiverem claros.",
             "- status=needs_clarification quando faltar informação crítica.",
-            "- Reutilize fatos já ditos no histórico da conversa; não peça de novo "
-            "um valor que o usuário já informou.",
+            (
+                "- Reutilize fatos já ditos no histórico da conversa; não peça de novo "
+                "um valor que o usuário já informou."
+            ),
+            (
+                "- Pedidos que acumulam análise anterior (ex.: «adicione X», «inclua Y») "
+                "devem unir nos ``filters`` os valores já usados no histórico com os "
+                "novos — não substitua o conjunto anterior só pelo valor novo."
+            ),
             "- entities: faça grounding das menções do usuário (role table|column|value).",
             "- filters/metrics/joins/group_by/order_by: use só table_id/column_id válidos.",
             "- question_rewrite: reformule a pergunta desambiguada em PT-BR.",
@@ -70,13 +77,26 @@ class Txt2SqlPromptBuilder:
                     "",
                     "### Tabelas shardadas (discriminador OBRIGATÓRIO em filters)",
                     f"Tabelas shardadas e discriminadores: {disc_lines}.",
-                    "- Se a pergunta (ou o histórico) JÁ traz o valor do discriminador "
-                    "da coluna indicada acima, use status=ready E inclua FilterClause "
-                    "em ``filters`` com esse valor (op=eq para um valor, op=in para vários).",
-                    "- NUNCA deixe o discriminador só no question_rewrite — sem "
-                    "``filters`` o roteamento pedirá o valor de novo ao usuário.",
-                    "- Só use needs_clarification pedindo o discriminador quando ele "
-                    "realmente NÃO aparece na pergunta nem no histórico.",
+                    (
+                        "- Se a pergunta (ou o histórico) JÁ traz o valor do discriminador "
+                        "da coluna indicada acima, use status=ready E inclua FilterClause "
+                        "em ``filters`` com esse valor (op=eq para um valor, op=in para vários)."
+                    ),
+                    (
+                        "- NUNCA deixe o discriminador só no question_rewrite — sem "
+                        "``filters`` o roteamento pedirá o valor de novo ao usuário."
+                    ),
+                    (
+                        "- Só use needs_clarification pedindo o discriminador quando ele "
+                        "realmente NÃO aparece na pergunta nem no histórico."
+                    ),
+                    (
+                        "- Pedidos que acumulam o conjunto anterior (ex.: «adicione X», "
+                        "«inclua Y», «além dos anteriores») devem fazer a união dos "
+                        "valores de discriminador já usados no histórico com o(s) novo(s), "
+                        "em ``filters`` com op=in — NÃO substitua o conjunto anterior "
+                        "apenas pelo valor novo."
+                    ),
                 ]
             )
         sections = [
@@ -184,8 +204,10 @@ class Txt2SqlPromptBuilder:
                 f"bancos): {names}."
             ),
             "",
-            "O roteamento de shard é feito automaticamente pelo sistema — você NÃO precisa "
-            "chamar nenhuma ferramenta de shard. Sua responsabilidade:",
+            (
+                "O roteamento de shard é feito automaticamente pelo sistema — você NÃO precisa "
+                "chamar nenhuma ferramenta de shard. Sua responsabilidade:"
+            ),
             (
                 "1. Inclua o valor do discriminador nos filtros do IntentPlan. Se a pergunta "
                 "NÃO traz o discriminador, indique `status=needs_clarification` e peça o "

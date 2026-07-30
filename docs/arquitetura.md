@@ -33,15 +33,15 @@ flowchart TB
   REG --> DB[(Bancos físicos)]
 ```
 
-### Dual-path (padrão) vs ReAct legado
+### Dual-path vs legado
 
-`build_agent(...)` usa o grafo dual-path por padrão (`txt2sql.graph`). Após `interpret_intent`, `resolve_and_route` combina `resolve_routing` (shard) + `route_execution` (simple \| analytical) — **sem tools de shard no LLM**. Passe `dual_path=False` para o loop ReAct em `agent.py` (`generate_query` + tools `resolve_shard` / `sql_db_query` / …).
+`build_agent(...)` compila **apenas** o grafo dual-path (`txt2sql.graph`). Após `interpret_intent`, `resolve_and_route` combina `resolve_routing` (shard) + `route_execution` (simple \| analytical) — **sem tools de shard no LLM**.
 
-Sharding e `force_analytical` entram via routing/policy — não via `resolve_shard` no loop ReAct. Detalhes: [ADR-0006](adr/0006-grafo-dual-path-padrao.md).
+Sharding e `force_analytical` entram via routing/policy. Detalhes: [ADR-0006](adr/0006-grafo-dual-path-padrao.md).
 
 ## Componentes
 
-**`build_agent` (`agent.py`)** — entrypoint; com `dual_path=True` delega a `graph.build_graph`; com `False` monta o ReAct legado.
+**`build_agent` (`agent.py`)** — entrypoint fino que delega a `graph.build_graph`.
 
 **`build_graph` (`graph.py`)** — grafo dual-path: intent → route → simple/analytical, budgets, HITL, verify/answer.
 
@@ -61,11 +61,9 @@ Sharding e `force_analytical` entram via routing/policy — não via `resolve_sh
 
 **`SchemaLoader` (`db/schema.py`)** — schema declarativo ou discovery + amostras.
 
-**`ShardResolver` (`db/shard.py`)** — tool `resolve_shard` (ReAct); o dual-path reusa o callable dotted via `resolve_routing`.
+**`fan_in` (`db/fan_in.py`)** — materializa um ou mais bindings shardados no nome lógico DuckDB.
 
-**`materialize_sharded_values` (`db/multi_shard.py`)** — fan-in multi-discriminador no DuckDB.
-
-**`DuckDBSession` / `DuckDBSessionStore`** — materialização em lotes; store file-backed por `thread_id` no dual-path.
+**`DuckDBSession` / `DuckDBSessionStore`** — materialização em lotes; store file-backed por `thread_id`.
 
 **`validate_sql` (`guardrail.py`)** — AST sqlglot fail-closed; denylist textual complementar.
 
@@ -74,14 +72,12 @@ Sharding e `force_analytical` entram via routing/policy — não via `resolve_sh
 ## Fluxo de dados (pergunta → resposta)
 
 1. Caller invoca o grafo com `HumanMessage` e `thread_id` (checkpointer recomendado para HITL).
-2. `init_state` prepara budget e contexto do turno (no dual-path, reusa sessão DuckDB do `thread_id` se existir).
+2. `init_state` prepara budget e contexto do turno (reusa sessão DuckDB do `thread_id` se existir).
 3. `interpret_intent` produz um `IntentPlan` validado — ou roteia para `ask_clarification` (interrupt / mensagem).
 4. `resolve_and_route` resolve shards e escolhe *simple* ou *analytical* (`force_analytical`, multi-shard, agregação em tabela DuckDB).
 5. **Simple:** LLM gera `SQLPlan` (postgres) → Policy Gate → `exec_source` → `verify` → `answer` (ou refine).
 6. **Analytical:** sufficiency gate (reuse/refresh) → plano de materialização → extract na origem → SQL DuckDB → `verify` → `answer`.
 7. Resultado compactado (`Budget.sample_rows` / truncamento) volta ao caminho de verificação até a resposta final.
-
-No ReAct (`dual_path=False`): após intent, o LLM chama tools (`resolve_shard` / `materialize_sharded_table` / `sql_db_query`); DuckDB é efêmero por turno.
 
 ## Dependências externas
 

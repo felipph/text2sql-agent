@@ -186,3 +186,5 @@ def test_build_intent_prompt_requires_discriminator_in_filters() -> None:
     assert "question_rewrite" in text
     assert "tenant_id" in text
     assert "CNPJ" not in text  # prompt parametrizado — sem domínio hardcoded
+    assert "adicione" in text.lower() or "acumul" in text.lower()
+    assert "união" in text.lower() or "uniao" in text.lower() or "op=in" in text

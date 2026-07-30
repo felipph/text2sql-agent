@@ -8,6 +8,7 @@ import pytest
 import yaml
 from sqlalchemy import create_engine, text
 
+from txt2sql.artifacts import ShardBinding
 from txt2sql.config import (
     AgentConfig,
     DatabaseConfig,
@@ -20,7 +21,6 @@ from txt2sql.config import (
 from txt2sql.db.duckdb_layer import DuckDBSession
 from txt2sql.db.fan_in import FanInResult, fan_in
 from txt2sql.db.registry import DatabaseRegistry
-from txt2sql.shard_routing import ShardBinding
 
 
 def test_load_config_max_shard_discriminators(tmp_path: Path) -> None:
@@ -180,6 +180,42 @@ def test_fan_in_rejects_missing_physical_table() -> None:
                 table=table,
                 registry=registry,
                 bindings=bad_bindings,
+            )
+    finally:
+        session.close()
+
+
+def test_fan_in_single_binding() -> None:
+    """Um único binding: verifica existência física e materializa."""
+    registry, config = _build_registry()
+    table = config.get_table("recebiveis")
+    session = DuckDBSession()
+    try:
+        result = fan_in(
+            session=session,
+            table=table,
+            registry=registry,
+            bindings=_bindings(["111"]),
+        )
+        assert result.row_count == 1
+        assert result.physical_tables == ["rec_a"]
+        rows = session.execute("SELECT cnpj, valor FROM recebiveis")
+        assert rows == [{"cnpj": "111", "valor": 10.0}]
+    finally:
+        session.close()
+
+
+def test_fan_in_rejects_empty_bindings() -> None:
+    registry, config = _build_registry()
+    table = config.get_table("recebiveis")
+    session = DuckDBSession()
+    try:
+        with pytest.raises(ValueError, match="vazio"):
+            fan_in(
+                session=session,
+                table=table,
+                registry=registry,
+                bindings=[],
             )
     finally:
         session.close()
