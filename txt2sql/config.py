@@ -317,8 +317,8 @@ class AgentConfig:
         sample_rows_in_table_info: Linhas de amostra no schema por default.
         custom_section: Texto livre anexado ao final do system prompt.
         dialect: Dialeto SQL principal (informado ao LLM e ao guardrail).
-        max_shard_discriminators: Máximo de discriminadores por chamada
-            ``materialize_sharded_table`` (fan-in multi-shard).
+        max_shards: Máximo de shards físicos distintos ``(database_id, physical_table)``
+            no fan-in / ``resolve_routing``.
         query_timeout: Timeout default de execução SELECT (segundos); 0 desliga.
         reuse_ttl_seconds: TTL de reuse do catálogo DuckDB (segundos).
             Default 1800 (30 min). ``0`` ou negativo desabilita a verificação.
@@ -338,7 +338,7 @@ class AgentConfig:
     sample_rows_in_table_info: int = 3
     custom_section: str | None = None
     dialect: str | None = None
-    max_shard_discriminators: int = 20
+    max_shards: int = 20
     query_timeout: int = 30
     reuse_ttl_seconds: int = 1800
 
@@ -353,9 +353,9 @@ class AgentConfig:
 
     def _validate(self) -> None:
         """Valida integridade referencial da configuração."""
-        if self.max_shard_discriminators < 1:
+        if self.max_shards < 1:
             raise ValueError(
-                f"max_shard_discriminators deve ser >= 1, recebido: {self.max_shard_discriminators}"
+                f"max_shards deve ser >= 1, recebido: {self.max_shards}"
             )
         if self.query_timeout < 0:
             raise ValueError(
@@ -568,7 +568,7 @@ def load_config(
         sample_rows_in_table_info=int(agent_raw.get("sample_rows_in_table_info", 3)),
         custom_section=raw.get("custom_section"),
         dialect=raw.get("dialect"),
-        max_shard_discriminators=int(agent_raw.get("max_shard_discriminators", 20)),
+        max_shards=int(agent_raw.get("max_shards", 20)),
         query_timeout=int(agent_raw.get("query_timeout", 30)),
         reuse_ttl_seconds=reuse_ttl_seconds,
         llm=llm,

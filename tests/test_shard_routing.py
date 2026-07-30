@@ -11,13 +11,14 @@ from txt2sql.config import (
 from txt2sql.intent import FilterClause, IntentPlan, MetricClause
 from txt2sql.shard_routing import (
     ClarifyNeeded,
+    cap_bindings_by_shards,
     ensure_discriminator_filters,
     missing_discriminator_filter_errors,
     resolve_routing,
 )
 
 
-def _cfg_sharded(*, value_extractor: str | None = None) -> AgentConfig:
+def _cfg_sharded(*, value_extractor: str | None = None, max_shards: int = 20) -> AgentConfig:
     return AgentConfig(
         databases=[
             DatabaseConfig(id="db", connection_string="sqlite:///:memory:"),
@@ -37,7 +38,7 @@ def _cfg_sharded(*, value_extractor: str | None = None) -> AgentConfig:
             ),
             TableConfig(id="clientes", database="db", name="clientes"),
         ],
-        max_shard_discriminators=20,
+        max_shards=max_shards,
     )
 
 
@@ -235,3 +236,93 @@ def test_resolve_routing_skips_db_check_without_registry() -> None:
     )
     assert isinstance(out, ShardRouting)
     assert out.bindings[0].database_id == "not_in_config"
+
+
+def test_cap_bindings_by_shards_many_discs_few_shards() -> None:
+    """Muitos discriminadores no mesmo físico contam como 1 shard."""
+
+    def resolver(value: str) -> ShardResult:
+        # pares → shard1, ímpares → shard2
+        n = int(value)
+        if n % 2 == 0:
+            return ShardResult(database_id="shard1", table_name="t_even")
+        return ShardResult(database_id="shard2", table_name="t_odd")
+
+    bindings = [
+        ShardBinding(
+            table_id="recebiveis",
+            discriminator_value=str(i),
+            database_id=resolver(str(i)).database_id,
+            physical_table=resolver(str(i)).table_name,
+        )
+        for i in range(50)
+    ]
+    capped = cap_bindings_by_shards(bindings, max_shards=20)
+    assert not capped.truncated
+    assert len(capped.bindings) == 50
+    assert capped.total_shards == 2
+    assert capped.kept_shards == 2
+
+
+def test_cap_bindings_by_shards_truncates_physical_shards() -> None:
+    bindings = [
+        ShardBinding(
+            table_id="recebiveis",
+            discriminator_value=str(i),
+            database_id=f"db_{i}",
+            physical_table=f"t_{i}",
+        )
+        for i in range(25)
+    ]
+    capped = cap_bindings_by_shards(bindings, max_shards=20)
+    assert capped.truncated
+    assert capped.total_shards == 25
+    assert capped.kept_shards == 20
+    assert len(capped.bindings) == 20
+    assert {b.discriminator_value for b in capped.bindings} == {str(i) for i in range(20)}
+    assert "max_shards=20" in (capped.assumption or "")
+
+
+def test_resolve_routing_caps_by_physical_shards_not_disc_count() -> None:
+    """50 CNPJs → 2 shards físicos com max_shards=2 → sem truncar bindings."""
+
+    def resolver(value: str) -> ShardResult:
+        n = int(value)
+        db = "shard1" if n % 2 == 0 else "shard2"
+        table = "t_even" if n % 2 == 0 else "t_odd"
+        return ShardResult(database_id=db, table_name=table)
+
+    values = [str(i) for i in range(50)]
+    plan = IntentPlan(
+        filters=[FilterClause(table_id="recebiveis", column_id="cnpj", op="in", value=values)],
+    )
+    out = resolve_routing(
+        plan,
+        _cfg_sharded(max_shards=2),
+        resolvers={"recebiveis": resolver},
+    )
+    assert isinstance(out, ShardRouting)
+    assert out.mode == "multi"
+    assert len(out.bindings) == 50
+    assert not out.capped
+
+
+def test_resolve_routing_caps_when_too_many_shards() -> None:
+    def resolver(value: str) -> ShardResult:
+        return ShardResult(database_id=f"db_{value}", table_name=f"t_{value}")
+
+    values = [str(i) for i in range(5)]
+    plan = IntentPlan(
+        filters=[FilterClause(table_id="recebiveis", column_id="cnpj", op="in", value=values)],
+    )
+    # databases only has shard1/shard2/db — skip registry check
+    out = resolve_routing(
+        plan,
+        _cfg_sharded(max_shards=2),
+        resolvers={"recebiveis": resolver},
+    )
+    assert isinstance(out, ShardRouting)
+    assert out.capped
+    assert len(out.bindings) == 2
+    assert out.cap_assumption
+    assert "2 de 5" in out.cap_assumption

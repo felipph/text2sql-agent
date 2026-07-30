@@ -88,7 +88,14 @@ class Txt2SqlPromptBuilder:
                     ),
                     (
                         "- Só use needs_clarification pedindo o discriminador quando ele "
-                        "realmente NÃO aparece na pergunta nem no histórico."
+                        "realmente NÃO aparece na pergunta nem no histórico E não há "
+                        "tabela relacionada não-shardada no intent que permita lookup "
+                        "automático (RelationshipConfig)."
+                    ),
+                    (
+                        "- Se a pergunta pede análise de 'todos' / escopo amplo e o intent "
+                        "já referencia a tabela lookup (ex.: clientes), use status=ready "
+                        "sem filters no discriminador — o sistema resolve via lookup."
                     ),
                     (
                         "- Pedidos que acumulam o conjunto anterior (ex.: «adicione X», "
@@ -209,13 +216,17 @@ class Txt2SqlPromptBuilder:
                 "chamar nenhuma ferramenta de shard. Sua responsabilidade:"
             ),
             (
-                "1. Inclua o valor do discriminador nos filtros do IntentPlan. Se a pergunta "
-                "NÃO traz o discriminador, indique `status=needs_clarification` e peça o "
-                "valor — NUNCA assuma ou invente."
+                "1. Inclua o valor do discriminador nos filtros do IntentPlan quando a "
+                "pergunta já trouxer o valor. Se a pergunta NÃO traz o discriminador "
+                "mas referencia uma tabela relacionada não-shardada que o contém "
+                "(ex.: cadastro de clientes), use status=ready sem inventar valores — "
+                "o sistema fará lookup automático. Só use needs_clarification pedindo "
+                "o discriminador quando ele não estiver na pergunta e não houver "
+                "tabela lookup relacionada no intent."
             ),
             (
                 "2. É TERMINANTEMENTE PROIBIDO fan-out cego (consultar todos os shards "
-                "sem discriminador explícito)."
+                "sem discriminador explícito nem lista descoberta via lookup)."
             ),
             (
                 "3. Quando a pergunta envolver 2+ discriminadores, o sistema fará fan-in "
@@ -228,9 +239,9 @@ class Txt2SqlPromptBuilder:
                 "resposta final."
             ),
             (
-                "5. Se o discriminador não consta na pergunta mas pode ser descoberto via "
-                "query em outra tabela, inclua essa dependência no IntentPlan antes de "
-                "consultar a tabela shardada."
+                "5. O sistema pode descobrir discriminadores via RelationshipConfig "
+                "(lookup-then-route). Não peça CNPJ/discriminador ao usuário só para "
+                "repetir um SELECT DISTINCT que o grafo já pode fazer."
             ),
             "",
             "Discriminadores por tabela:",

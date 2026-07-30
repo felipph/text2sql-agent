@@ -16,6 +16,65 @@ class ClarifyNeeded:
     question: str
 
 
+@dataclass(frozen=True)
+class CapResult:
+    bindings: list[ShardBinding]
+    truncated: bool
+    total_shards: int
+    kept_shards: int
+    assumption: str | None = None
+
+
+def _physical_key(b: ShardBinding) -> tuple[str, str]:
+    return (b.database_id, b.physical_table)
+
+
+def cap_bindings_by_shards(
+    bindings: list[ShardBinding],
+    max_shards: int,
+) -> CapResult:
+    """Limita bindings pelo número de shards físicos distintos.
+
+    Ordem estável: primeira aparição do par ``(database_id, physical_table)``.
+    """
+    if max_shards < 1:
+        raise ValueError(f"max_shards deve ser >= 1, recebido: {max_shards}")
+
+    order: list[tuple[str, str]] = []
+    by_key: dict[tuple[str, str], list[ShardBinding]] = {}
+    for b in bindings:
+        key = _physical_key(b)
+        if key not in by_key:
+            by_key[key] = []
+            order.append(key)
+        by_key[key].append(b)
+
+    total = len(order)
+    if total <= max_shards:
+        return CapResult(
+            bindings=list(bindings),
+            truncated=False,
+            total_shards=total,
+            kept_shards=total,
+        )
+
+    kept_keys = order[:max_shards]
+    kept: list[ShardBinding] = []
+    for key in kept_keys:
+        kept.extend(by_key[key])
+    assumption = (
+        f"Cobertura parcial: {max_shards} de {total} shards físicos "
+        f"(max_shards={max_shards})"
+    )
+    return CapResult(
+        bindings=kept,
+        truncated=True,
+        total_shards=total,
+        kept_shards=max_shards,
+        assumption=assumption,
+    )
+
+
 def _discriminator_values_from_filters(
     intent_plan: IntentPlan,
     table_id: str,
@@ -200,8 +259,6 @@ def resolve_routing(
         return ShardRouting(mode="none")
 
     all_bindings: list[ShardBinding] = []
-    total_values = 0
-    multi_table_id: str | None = None
 
     for table in sharded_touched:
         assert table.sharding is not None
@@ -227,14 +284,6 @@ def resolve_routing(
                 discriminator_column=disc_col,
                 question=_clarify_question(table, disc_col),
             )
-
-        if len(values) > config.max_shard_discriminators:
-            values = values[: config.max_shard_discriminators]
-
-        if len(values) >= 2:
-            multi_table_id = table.id
-
-        total_values += len(values)
 
         if resolvers is not None and table.id in resolvers:
             resolve_fn = resolvers[table.id]
@@ -265,8 +314,32 @@ def resolve_routing(
     if not all_bindings:
         return ShardRouting(mode="none")
 
+    capped = cap_bindings_by_shards(all_bindings, config.max_shards)
+    all_bindings = capped.bindings
+    # Recompute multi after cap
+    disc_counts: dict[str, set[str]] = {}
+    for b in all_bindings:
+        disc_counts.setdefault(b.table_id, set()).add(b.discriminator_value)
+    total_values = sum(len(v) for v in disc_counts.values())
+    multi_table_id = None
+    for tid, vals in disc_counts.items():
+        if len(vals) >= 2:
+            multi_table_id = tid
+            break
+
     if total_values >= 2 or multi_table_id is not None:
         logical = multi_table_id or sharded_touched[0].id
-        return ShardRouting(mode="multi", bindings=all_bindings, logical_table=logical)
+        return ShardRouting(
+            mode="multi",
+            bindings=all_bindings,
+            logical_table=logical,
+            capped=capped.truncated,
+            cap_assumption=capped.assumption,
+        )
 
-    return ShardRouting(mode="single", bindings=all_bindings)
+    return ShardRouting(
+        mode="single",
+        bindings=all_bindings,
+        capped=capped.truncated,
+        cap_assumption=capped.assumption,
+    )

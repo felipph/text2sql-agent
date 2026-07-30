@@ -23,26 +23,26 @@ from txt2sql.db.fan_in import FanInResult, fan_in
 from txt2sql.db.registry import DatabaseRegistry
 
 
-def test_load_config_max_shard_discriminators(tmp_path: Path) -> None:
+def test_load_config_max_shards(tmp_path: Path) -> None:
     raw = {
         "databases": [{"id": "db", "connection_string": "sqlite:///:memory:"}],
         "tables": [{"id": "t", "database": "db", "name": "t"}],
-        "agent": {"max_shard_discriminators": 7},
+        "agent": {"max_shards": 7},
     }
     p = tmp_path / "c.yaml"
     p.write_text(yaml.dump(raw), encoding="utf-8")
     cfg = load_config(p)
-    assert cfg.max_shard_discriminators == 7
+    assert cfg.max_shards == 7
 
 
-def test_load_config_max_shard_discriminators_default(tmp_path: Path) -> None:
+def test_load_config_max_shards_default(tmp_path: Path) -> None:
     raw = {
         "databases": [{"id": "db", "connection_string": "sqlite:///:memory:"}],
         "tables": [{"id": "t", "database": "db", "name": "t"}],
     }
     p = tmp_path / "c.yaml"
     p.write_text(yaml.dump(raw), encoding="utf-8")
-    assert load_config(p).max_shard_discriminators == 20
+    assert load_config(p).max_shards == 20
 
 
 def _sharded_table() -> TableConfig:

@@ -36,7 +36,7 @@ Estado tipado inclui, entre outros: `intent_plan`, `shard_routing`, `execution_p
 
 Fluxo resumido: `interpret_intent` → (clarificação HITL se preciso) → `resolve_and_route` → *simple* (`generate_sql` → `exec_source` → `verify` → `answer`) ou *analytical* (`sufficiency_gate` → materialização → SQL DuckDB → `verify` → `answer`).
 
-O LLM **não** chama tools de shard/SQL: sharding via `resolve_routing` / `resolve_and_route`, execução via nós determinísticos + Policy Gate. Limite de discriminadores: `agent.max_shard_discriminators` (default `20`).
+O LLM **não** chama tools de shard/SQL: sharding via `resolve_routing` / `resolve_and_route`, execução via nós determinísticos + Policy Gate. Limite de shards físicos: `agent.max_shards` (default `20`). Sem discriminador, o grafo pode fazer lookup via `RelationshipConfig` (tabela não-shardada).
 
 ### HITL (clarificação)
 
@@ -61,7 +61,7 @@ agent.invoke(Command(resume="resposta do usuário"), config=cfg)
 |-------|---------|--------|
 | `top_k` | 20 | Truncamento de linhas no resultado |
 | `max_pages` | 10 | Máx. de queries de dados por turno |
-| `max_shard_discriminators` | 20 | Máx. de discriminadores por fan-in / resolve_routing |
+| `max_shards` | 20 | Máx. de shards físicos distintos `(database_id, physical_table)` no fan-in / resolve_routing |
 | `query_timeout` | 30 | Timeout de execução SELECT OLTP (segundos); `0` desliga |
 
 Cada entrada em `databases[]` pode definir `query_timeout` opcional para sobrescrever o global. Use `AgentConfig.effective_query_timeout(database_id)` para obter o valor efetivo.

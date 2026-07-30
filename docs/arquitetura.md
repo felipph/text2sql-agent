@@ -18,6 +18,8 @@ flowchart TB
   II -->|needs_clarification| AC[ask_clarification / HITL]
   AC -->|resume| II
   II -->|intent válido| RR[resolve_and_route]
+  RR -->|ClarifyNeeded + lookup| LK[discriminator lookup]
+  LK --> RR
   RR -->|simple| SP[generate_sql → exec_source → verify → answer]
   RR -->|analytical| AP[sufficiency_gate → plan_materialization → materialize → check_materialization → generate_analytical_sql → exec_duckdb → verify → answer]
   SP --> PG[policy.check_sql_plan + guardrail]
@@ -74,7 +76,7 @@ Sharding e `force_analytical` entram via routing/policy. Detalhes: [ADR-0006](ad
 1. Caller invoca o grafo com `HumanMessage` e `thread_id` (checkpointer recomendado para HITL).
 2. `init_state` prepara budget e contexto do turno (reusa sessão DuckDB do `thread_id` se existir).
 3. `interpret_intent` produz um `IntentPlan` validado — ou roteia para `ask_clarification` (interrupt / mensagem).
-4. `resolve_and_route` resolve shards e escolhe *simple* ou *analytical* (`force_analytical`, multi-shard, agregação em tabela DuckDB).
+4. `resolve_and_route` resolve shards e escolhe *simple* ou *analytical* (`force_analytical`, multi-shard, agregação em tabela DuckDB). Se faltar discriminador mas existir tabela lookup relacionada (`RelationshipConfig`), faz lookup-then-route (DISTINCT → injeta filters → re-resolve) sem HITL.
 5. **Simple:** LLM gera `SQLPlan` (postgres) → Policy Gate → `exec_source` → `verify` → `answer` (ou refine).
 6. **Analytical:** sufficiency gate (reuse/refresh) → plano de materialização → extract na origem → SQL DuckDB → `verify` → `answer`.
 7. Resultado compactado (`Budget.sample_rows` / truncamento) volta ao caminho de verificação até a resposta final.

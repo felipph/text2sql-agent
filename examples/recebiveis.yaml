@@ -81,7 +81,7 @@ agent:
   max_pages: 10
   max_string_length: 10000
   read_only: true
-  max_shard_discriminators: 20  # teto de CNPJs por fan-in multi-shard
+  max_shards: 20  # teto de shards físicos distintos no fan-in
 
 llm:
   # Opcional — se omitido, usa as env vars AZURE_OPENAI_*.

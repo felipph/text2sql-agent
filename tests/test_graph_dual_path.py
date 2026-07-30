@@ -26,9 +26,12 @@ from txt2sql.artifacts import (
 from txt2sql.config import (
     AgentConfig,
     ColumnConfig,
+    ColumnRef,
     DatabaseConfig,
     DuckDBConfig,
+    RelationshipConfig,
     ShardingConfig,
+    ShardResult,
     TableConfig,
 )
 from txt2sql.intent import (
@@ -371,6 +374,187 @@ def test_missing_discriminator_retries_intent_before_clarify(monkeypatch: Any) -
         or (hasattr(m, "content") and "discriminador" in str(getattr(m, "content", "")).lower())
     ]
     assert feedbacks or result.get("intent_retries", 0) >= 1
+
+
+def _resolve_lookup_shard(value: str) -> ShardResult:
+    digits = "".join(ch for ch in value if ch.isdigit())
+    prefix = (digits or "000")[:3]
+    return ShardResult(database_id="db_shard_1", table_name=f"recebiveis_{prefix}")
+
+
+def _cfg_lookup_clientes_recebiveis(tmp: Path) -> AgentConfig:
+    main_db = tmp / "main.db"
+    shard_db = tmp / "shard.db"
+    conn = sqlite3.connect(main_db)
+    conn.executescript(
+        "CREATE TABLE clientes (cnpj TEXT, razao_social TEXT);"
+        "INSERT INTO clientes VALUES ('11100000000191', 'A');"
+        "INSERT INTO clientes VALUES ('22200000000191', 'B');"
+    )
+    conn.commit()
+    conn.close()
+    conn = sqlite3.connect(shard_db)
+    conn.executescript(
+        "CREATE TABLE recebiveis_111 (cnpj TEXT, valor REAL);"
+        "INSERT INTO recebiveis_111 VALUES ('11100000000191', 10.0);"
+        "CREATE TABLE recebiveis_222 (cnpj TEXT, valor REAL);"
+        "INSERT INTO recebiveis_222 VALUES ('22200000000191', 20.0);"
+    )
+    conn.commit()
+    conn.close()
+    return AgentConfig(
+        databases=[
+            DatabaseConfig(id="db_main", connection_string=f"sqlite:///{main_db}"),
+            DatabaseConfig(id="db_shard_1", connection_string=f"sqlite:///{shard_db}"),
+        ],
+        tables=[
+            TableConfig(
+                id="clientes",
+                database="db_main",
+                name="clientes",
+                columns=[ColumnConfig(name="cnpj"), ColumnConfig(name="razao_social")],
+                duckdb=DuckDBConfig(enabled=True, trigger="join", fetch_limit=1000),
+            ),
+            TableConfig(
+                id="recebiveis",
+                database="db_main",
+                name="recebiveis",
+                sharding=ShardingConfig(
+                    discriminator_column="cnpj",
+                    resolver="tests.test_graph_dual_path:_resolve_lookup_shard",
+                ),
+                columns=[ColumnConfig(name="cnpj"), ColumnConfig(name="valor")],
+                duckdb=DuckDBConfig(
+                    enabled=True, force_analytical=True, fetch_limit=1000
+                ),
+            ),
+        ],
+        relationships=[
+            RelationshipConfig(
+                from_ref=ColumnRef(table="recebiveis", column="cnpj"),
+                to_ref=ColumnRef(table="clientes", column="cnpj"),
+            )
+        ],
+        max_shards=20,
+    )
+
+
+def test_discriminator_lookup_injects_filters_without_hitl(monkeypatch: Any) -> None:
+    """Sem CNPJ em filters, com relationship → lookup em clientes e segue analytical."""
+    _env()
+    tmp = Path(tempfile.mkdtemp())
+    cfg = _cfg_lookup_clientes_recebiveis(tmp)
+    ready = IntentPlan(
+        status="ready",
+        question_rewrite="análise de todos os clientes",
+        metrics=[MetricClause(table_id="recebiveis", column_id="valor", agg="sum")],
+        entities=[
+            EntityRef(mention="clientes", table_id="clientes", role="table"),
+            EntityRef(mention="recebiveis", table_id="recebiveis", role="table"),
+        ],
+        joins=[
+            JoinClause(
+                from_table_id="clientes",
+                to_table_id="recebiveis",
+                on=[JoinOn(from_column="cnpj", to_column="cnpj")],
+            )
+        ],
+    )
+    mat_plan = MaterializationPlan(
+        steps=[
+            MaterializationStep(
+                source_query="SELECT cnpj, valor FROM recebiveis_111",
+                target_table="recebiveis",
+                mode="replace",
+            )
+        ],
+        rationale="extract",
+    )
+    script = [
+        ready,
+        ready,  # retry por missing filter
+        mat_plan,
+        SQLPlan(sql="SELECT SUM(valor) AS total FROM recebiveis", dialect="duckdb"),
+        VerifyDecision(action="answer", reason="ok"),
+        "Total agregado dos clientes.",
+    ]
+    monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: ScriptedLLM(script))
+    monkeypatch.setattr(
+        "txt2sql.analytical_planning.build_deterministic_mat_plan", lambda *_a, **_k: None
+    )
+    agent = build_agent(cfg, checkpointer=MemorySaver())
+    result = agent.invoke(
+        {"messages": [HumanMessage(content="análise de todos os clientes")]},
+        config={"configurable": {"thread_id": "lookup-all-clients"}},
+    )
+
+    plan = _d(result.get("intent_plan"))
+    assert plan.get("status") == "ready"
+    filters = plan.get("filters") or []
+    assert filters, "lookup deve injetar filters com CNPJs"
+    discs = set()
+    for f in filters:
+        if f.get("column_id") == "cnpj":
+            if f.get("op") == "in":
+                discs.update(str(v) for v in f.get("value") or [])
+            else:
+                discs.add(str(f.get("value")))
+    assert discs == {"11100000000191", "22200000000191"}
+    assert result.get("execution_path") == "analytical"
+    assert result.get("final_answer")
+    assert any("lookup" in a.lower() for a in (plan.get("assumptions") or []))
+
+
+def test_discriminator_lookup_skipped_when_filter_present(monkeypatch: Any) -> None:
+    """Filter explícito → lookup não sobrescreve / não clarifica."""
+    _env()
+    tmp = Path(tempfile.mkdtemp())
+    cfg = _cfg_lookup_clientes_recebiveis(tmp)
+    ready = IntentPlan(
+        status="ready",
+        question_rewrite="total do CNPJ",
+        filters=[
+            FilterClause(
+                table_id="recebiveis",
+                column_id="cnpj",
+                op="eq",
+                value="11100000000191",
+            )
+        ],
+        metrics=[MetricClause(table_id="recebiveis", column_id="valor", agg="sum")],
+    )
+    mat_plan = MaterializationPlan(
+        steps=[
+            MaterializationStep(
+                source_query="SELECT cnpj, valor FROM recebiveis_111",
+                target_table="recebiveis",
+                mode="replace",
+            )
+        ],
+        rationale="extract",
+    )
+    script = [
+        ready,
+        mat_plan,
+        SQLPlan(sql="SELECT SUM(valor) AS total FROM recebiveis", dialect="duckdb"),
+        VerifyDecision(action="answer", reason="ok"),
+        "Total 10.",
+    ]
+    monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: ScriptedLLM(script))
+    monkeypatch.setattr(
+        "txt2sql.analytical_planning.build_deterministic_mat_plan", lambda *_a, **_k: None
+    )
+    agent = build_agent(cfg, checkpointer=MemorySaver())
+    result = agent.invoke(
+        {"messages": [HumanMessage(content="total CNPJ 11100000000191")]},
+        config={"configurable": {"thread_id": "lookup-skip"}},
+    )
+    plan = _d(result.get("intent_plan"))
+    assumptions = plan.get("assumptions") or []
+    assert not any("lookup" in a.lower() for a in assumptions)
+    assert result.get("execution_path") == "analytical"
+    filters = plan.get("filters") or []
+    assert any(f.get("op") == "eq" and f.get("value") == "11100000000191" for f in filters)
 
 
 def test_check_materialization_retries_plan(monkeypatch: Any) -> None:

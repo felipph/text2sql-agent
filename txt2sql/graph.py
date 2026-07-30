@@ -505,25 +505,97 @@ def build_graph(
             extra_text=_last_human_text(state),
             registry=registry,
         )
+
+        assumptions: list[str] = list(plan.assumptions or [])
+        partial = bool(state.get("partial"))
+
         if isinstance(routing_result, ClarifyNeeded):
-            clarify = plan.model_copy(
-                update={
-                    "status": "needs_clarification",
-                    "clarification": Clarification(question=routing_result.question),
-                }
+            from txt2sql.discriminator_lookup import (
+                find_lookup_source,
+                inject_discriminator_filter,
+                run_discriminator_lookup,
             )
-            budget = _budget(state)
-            if budget.exhausted("clarification_count"):
+
+            lookup_src = find_lookup_source(plan, config)
+            if lookup_src is not None:
+                session = state.get("duckdb_session")
+                lookup = run_discriminator_lookup(
+                    lookup_src,
+                    config=config,
+                    registry=registry,
+                    duckdb_session=session,
+                    catalog=_catalog(state),
+                )
+                if lookup.error or not lookup.values:
+                    question = (
+                        lookup.error
+                        or routing_result.question
+                    )
+                    clarify = plan.model_copy(
+                        update={
+                            "status": "needs_clarification",
+                            "clarification": Clarification(question=question),
+                        }
+                    )
+                    budget = _budget(state)
+                    if budget.exhausted("clarification_count"):
+                        return {
+                            "intent_plan": clarify,
+                            "intent_route": "finish",
+                            "final_answer": CLARIFICATION_EXHAUSTED,
+                            "messages": [AIMessage(content=CLARIFICATION_EXHAUSTED)],
+                        }
+                    return {
+                        "intent_plan": clarify,
+                        "intent_route": "ask_clarification",
+                    }
+
+                plan = inject_discriminator_filter(plan, lookup_src, lookup.values)
+                assumptions.append(
+                    f"Discriminadores obtidos via lookup em {lookup_src.lookup_table_id}."
+                )
+                if lookup.truncated_by_fetch:
+                    partial = True
+                    assumptions.append(
+                        "Lista de discriminadores truncada no lookup "
+                        f"(fetch_limit da tabela {lookup_src.lookup_table_id})."
+                    )
+                routing_result = resolve_routing(
+                    plan,
+                    config,
+                    extra_text=_last_human_text(state),
+                    registry=registry,
+                )
+
+            if isinstance(routing_result, ClarifyNeeded):
+                clarify = plan.model_copy(
+                    update={
+                        "status": "needs_clarification",
+                        "clarification": Clarification(question=routing_result.question),
+                    }
+                )
+                budget = _budget(state)
+                if budget.exhausted("clarification_count"):
+                    return {
+                        "intent_plan": clarify,
+                        "intent_route": "finish",
+                        "final_answer": CLARIFICATION_EXHAUSTED,
+                        "messages": [AIMessage(content=CLARIFICATION_EXHAUSTED)],
+                    }
                 return {
                     "intent_plan": clarify,
-                    "intent_route": "finish",
-                    "final_answer": CLARIFICATION_EXHAUSTED,
-                    "messages": [AIMessage(content=CLARIFICATION_EXHAUSTED)],
+                    "intent_route": "ask_clarification",
                 }
-            return {
-                "intent_plan": clarify,
-                "intent_route": "ask_clarification",
-            }
+
+        assert not isinstance(routing_result, ClarifyNeeded)
+        if routing_result.capped and routing_result.cap_assumption:
+            partial = True
+            if routing_result.cap_assumption not in assumptions:
+                assumptions.append(routing_result.cap_assumption)
+
+        if assumptions != list(plan.assumptions or []):
+            plan = plan.model_copy(update={"assumptions": assumptions})
+
         plan = ensure_discriminator_filters(plan, routing_result, config)
         path = route_execution(plan, routing_result, config)
         logger.info("resolve_and_route: path={} shard_mode={}", path, routing_result.mode)
@@ -532,6 +604,7 @@ def build_graph(
             "shard_routing": routing_result,
             "execution_path": path,
             "intent_route": path,
+            "partial": partial,
         }
 
     def generate_sql(state: GraphState) -> dict[str, Any]:

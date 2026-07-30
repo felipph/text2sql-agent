@@ -71,7 +71,7 @@ agent:
   max_pages: 10
   max_string_length: 10000
   read_only: true
-  max_shard_discriminators: 20
+  max_shards: 20
   query_timeout: 30
 
 llm:
@@ -81,6 +81,7 @@ llm:
 
 custom_section: |
   Playground de testes. recebiveis é SHARDADA por CNPJ (2 shards).
-  Inclua o CNPJ em IntentPlan.filters (eq/in). Sem discriminador na pergunta:
-  peça clarificação. NUNCA faça fan-out cego sem lista de discriminadores.
+  Inclua o CNPJ em IntentPlan.filters (eq/in) quando a pergunta já trouxer o valor.
+  Sem discriminador mas com escopo via clientes: o sistema faz lookup automático.
+  NUNCA faça fan-out cego sem lista de discriminadores.
   NUNCA JOIN cross-database entre clientes e recebiveis.

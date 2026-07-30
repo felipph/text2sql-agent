@@ -69,6 +69,8 @@ class ShardRouting(BaseModel):
     mode: Literal["none", "single", "multi"] = "none"
     bindings: list[ShardBinding] = Field(default_factory=list)
     logical_table: str | None = None
+    capped: bool = False
+    cap_assumption: str | None = None
 
 
 class SQLPlan(BaseModel):

@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-27
-amended: 2026-07-29
+amended: 2026-07-30
 ---
 
 # ADR-0002: Sharding determinístico sem fan-out
@@ -28,12 +28,20 @@ Chosen option: **resolver determinístico `(discriminador) → ShardResult`, fan
 - Custo e blast radius previsíveis por pergunta
 - Contrato explícito via `ShardResult` / `ShardRouting`
 - Cross-shard com lista conhecida: fan-in via DuckDB; fan-out cego continua proibido
+- Lista descoberta via tabela lookup não-shardada (`RelationshipConfig`) — lookup-then-route — sem HITL no caminho feliz
 
 **Negative:**
-- Dual-path: IntentPlan precisa carregar o discriminador nos filtros (senão clarify)
+- Dual-path: IntentPlan precisa carregar o discriminador nos filtros (senão clarify **ou** lookup)
 - ReAct: LLM precisa ser instruído a resolver (single) ou materializar (multi) antes de consultar
-- Análise multi limitada por `max_shard_discriminators` e `fetch_limit` por grupo físico
+- Análise multi limitada por `max_shards` (shards físicos distintos) e `fetch_limit` por grupo/lookup
 
 **Neutral:**
 - Resolver é código do usuário (`modulo:funcao`), não hardcoded
 - Extração textual de discriminadores (quando o IntentPlan omite `filters`) também é adapter opcional via `sharding.value_extractor` — a lib não embute formatos de domínio (CNPJ/CPF/etc.)
+- Cap `max_shards` aplica-se após o resolve, por `(database_id, physical_table)`
+
+## Emenda 2026-07-30 — lookup-then-route + `max_shards`
+
+Quando `resolve_routing` não encontra discriminador mas existe `RelationshipConfig` ligando a coluna do discriminador a uma tabela **não-shardada**, o nó `resolve_and_route` executa `SELECT DISTINCT` nessa lookup (origem ou DuckDB se já materializada), injeta `FilterClause(op=in)` e re-resolve. Isso **não** é fan-out cego: a lista de discriminadores é materializada antes do fan-in.
+
+`agent.max_shard_discriminators` foi renomeado para `agent.max_shards`: o teto conta shards físicos distintos, não a quantidade de valores do discriminador.
