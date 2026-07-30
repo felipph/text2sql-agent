@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -16,40 +15,29 @@ class ClarifyNeeded:
     question: str
 
 
-_CNPJ_RE = re.compile(r"\b(\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2}|\d{14})\b")
-_CPF_RE = re.compile(r"\b(\d{3}\.?\d{3}\.?\d{3}-?\d{2}|\d{11})\b")
-
-
-def _normalize_digits(raw: str) -> str:
-    return re.sub(r"\D", "", raw)
-
-
-def extract_discriminator_candidates(text: str, disc_col: str) -> list[str]:
-    """Extrai candidatos a discriminador de texto livre (rewrite / mensagem).
-
-    Fallback determinístico quando o IntentPlan omite o valor em ``filters``.
-    Hoje cobre CNPJ/CPF (identificadores numéricos do domínio); outras colunas
-    retornam lista vazia (clarificação permanece).
-    """
-    if not text or not disc_col:
-        return []
-    col = disc_col.split(".")[-1].lower()
+def _discriminator_values_from_filters(
+    intent_plan: IntentPlan,
+    table_id: str,
+    disc_col: str,
+) -> list[str]:
+    """Extrai valores do discriminador apenas de ``filters`` (eq / in)."""
+    values: list[str] = []
+    for f in intent_plan.filters:
+        if f.table_id != table_id:
+            continue
+        col = f.column_id.split(".")[-1] if f.column_id else ""
+        if col != disc_col and f.column_id != disc_col:
+            continue
+        if f.op == "eq" and f.value is not None:
+            values.append(str(f.value))
+        elif f.op == "in" and isinstance(f.value, list):
+            values.extend(str(v) for v in f.value)
     seen: set[str] = set()
     out: list[str] = []
-
-    if col == "cnpj":
-        pattern, length = _CNPJ_RE, 14
-    elif col == "cpf":
-        pattern, length = _CPF_RE, 11
-    else:
-        return []
-
-    for match in pattern.finditer(text):
-        digits = _normalize_digits(match.group(1))
-        if len(digits) != length or digits in seen:
-            continue
-        seen.add(digits)
-        out.append(digits)
+    for v in values:
+        if v not in seen:
+            seen.add(v)
+            out.append(v)
     return out
 
 
@@ -59,35 +47,28 @@ def _discriminator_values(
     disc_col: str,
     *,
     extra_text: str | None = None,
+    extractor: Callable[[str], list[str]] | None = None,
 ) -> list[str]:
-    """Extract discriminator values from filters (eq / in), then text fallback."""
-    values: list[str] = []
-    for f in intent_plan.filters:
-        if f.table_id != table_id:
-            continue
-        # column_id may be "cnpj" or "recebiveis.cnpj" style — match disc_col or endswith
-        col = f.column_id.split(".")[-1] if f.column_id else ""
-        if col != disc_col and f.column_id != disc_col:
-            continue
-        if f.op == "eq" and f.value is not None:
-            values.append(str(f.value))
-        elif f.op == "in" and isinstance(f.value, list):
-            values.extend(str(v) for v in f.value)
-    # preserve order, unique
-    seen: set[str] = set()
-    out: list[str] = []
-    for v in values:
-        if v not in seen:
-            seen.add(v)
-            out.append(v)
-    if out:
-        return out
-
-    # Fallback: question_rewrite + mensagem do usuário
+    """Valores do discriminador: filters primeiro; extractor textual como fallback."""
+    from_filters = _discriminator_values_from_filters(intent_plan, table_id, disc_col)
+    if from_filters:
+        return from_filters
+    if extractor is None:
+        return []
     blob = " ".join(
         part for part in (intent_plan.question_rewrite or "", extra_text or "") if part
     )
-    return extract_discriminator_candidates(blob, disc_col)
+    if not blob.strip():
+        return []
+    raw = extractor(blob)
+    seen: set[str] = set()
+    out: list[str] = []
+    for v in raw:
+        s = str(v).strip()
+        if s and s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
 
 
 def _touched_table_ids(intent_plan: IntentPlan) -> set[str]:
@@ -115,16 +96,40 @@ def _clarify_question(table: TableConfig, disc_col: str) -> str:
     return f"Para consultar a tabela {name!r}, informe o valor de {label} (coluna {disc_col})."
 
 
+def missing_discriminator_filter_errors(
+    intent_plan: IntentPlan,
+    config: AgentConfig,
+) -> list[str]:
+    """Erros estruturais: tabela shardada tocada sem filter no discriminador.
+
+    Usado pelo nó ``interpret_intent`` para pedir retry ao LLM antes de
+    clarificar o usuário. Domain-free: a coluna vem do YAML.
+    """
+    if intent_plan.status != "ready":
+        return []
+    errors: list[str] = []
+    for table_id in sorted(_touched_table_ids(intent_plan)):
+        table = config.try_get_table(table_id)
+        if table is None or not table.is_sharded or table.sharding is None:
+            continue
+        disc_col = table.sharding.discriminator_column
+        if _discriminator_values_from_filters(intent_plan, table_id, disc_col):
+            continue
+        errors.append(
+            f"Tabela shardada {table_id!r} exige FilterClause em "
+            f"filters com column_id={disc_col!r} (op=eq ou op=in) quando o "
+            f"valor do discriminador já estiver na pergunta ou no histórico. "
+            f"Não deixe o valor só em question_rewrite."
+        )
+    return errors
+
+
 def ensure_discriminator_filters(
     intent_plan: IntentPlan,
     routing: ShardRouting,
     config: AgentConfig,
 ) -> IntentPlan:
-    """Garante FilterClause(eq/in) para discriminadores presentes nos bindings.
-
-    Quando o fallback textual resolveu o shard, o plano pode ainda estar sem
-    ``filters`` — enriquecer evita SQL sem WHERE no discriminador.
-    """
+    """Garante FilterClause(eq/in) para discriminadores presentes nos bindings."""
     if not routing.bindings:
         return intent_plan
 
@@ -139,7 +144,7 @@ def ensure_discriminator_filters(
         if table is None or table.sharding is None:
             continue
         disc_col = table.sharding.discriminator_column
-        existing = _discriminator_values(
+        existing = _discriminator_values_from_filters(
             IntentPlan(filters=new_filters), table_id, disc_col
         )
         if existing:
@@ -169,15 +174,14 @@ def resolve_routing(
     config: AgentConfig,
     resolvers: dict[str, Callable[[str], ShardResult]] | None = None,
     *,
+    extractors: dict[str, Callable[[str], list[str]]] | None = None,
     extra_text: str | None = None,
 ) -> ShardRouting | ClarifyNeeded:
     """Resolve shard bindings for sharded tables touched by the intent.
 
     resolvers: optional map table_id -> callable(discriminator) -> ShardResult
-    If omitted, use table.sharding.load_resolver() for each sharded table.
-
-    extra_text: mensagem do usuário (ou outro texto) para fallback quando o
-    discriminador não está em ``filters`` mas aparece no texto.
+    extractors: optional map table_id -> callable(text) -> list[str] (fallback)
+    If omitted, load from ``ShardingConfig`` on each table.
     """
     touched = _touched_table_ids(intent_plan)
     if not touched:
@@ -199,8 +203,19 @@ def resolve_routing(
     for table in sharded_touched:
         assert table.sharding is not None
         disc_col = table.sharding.discriminator_column
+
+        extractor: Callable[[str], list[str]] | None = None
+        if extractors is not None and table.id in extractors:
+            extractor = extractors[table.id]
+        else:
+            extractor = table.sharding.load_value_extractor()
+
         values = _discriminator_values(
-            intent_plan, table.id, disc_col, extra_text=extra_text
+            intent_plan,
+            table.id,
+            disc_col,
+            extra_text=extra_text,
+            extractor=extractor,
         )
 
         if not values:
@@ -210,7 +225,6 @@ def resolve_routing(
                 question=_clarify_question(table, disc_col),
             )
 
-        # Trunca como materialize_sharded_table quando excede o cap configurado.
         if len(values) > config.max_shard_discriminators:
             values = values[: config.max_shard_discriminators]
 

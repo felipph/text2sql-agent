@@ -174,7 +174,7 @@ def test_build_intent_prompt_requires_discriminator_in_filters() -> None:
                 database="db",
                 name="recebiveis",
                 sharding=ShardingConfig(
-                    discriminator_column="cnpj",
+                    discriminator_column="tenant_id",
                     resolver="playground.shard_resolver:resolve_cnpj_shard",
                 ),
             )
@@ -184,4 +184,5 @@ def test_build_intent_prompt_requires_discriminator_in_filters() -> None:
     assert "discriminador" in text.lower()
     assert "filters" in text
     assert "question_rewrite" in text
-    assert "cnpj" in text.lower()
+    assert "tenant_id" in text
+    assert "CNPJ" not in text  # prompt parametrizado — sem domínio hardcoded

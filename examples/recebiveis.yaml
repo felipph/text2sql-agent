@@ -46,6 +46,7 @@ tables:
     sharding:
       discriminator_column: cnpj
       resolver: "examples.shard_resolver_example:resolve_cnpj_shard"
+      value_extractor: "examples.shard_resolver_example:extract_cnpj_values"
     columns:
       - name: cnpj
         type: VARCHAR
@@ -90,6 +91,5 @@ llm:
 
 custom_section: |
   Você é especialista em análise de crédito e recebíveis.
-  Lembre-se: `recebiveis` é SHARDADA por CNPJ — com um CNPJ use `resolve_shard`;
-  com 2+ CNPJs use `materialize_sharded_table` e consulte pelo nome lógico.
-  NUNCA faça fan-out cego sem lista de discriminadores.
+  Lembre-se: `recebiveis` é SHARDADA por CNPJ — o IntentPlan deve incluir
+  o CNPJ em filters (eq/in). NUNCA faça fan-out cego sem lista de discriminadores.

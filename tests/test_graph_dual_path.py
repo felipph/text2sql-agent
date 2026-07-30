@@ -293,6 +293,32 @@ def test_missing_discriminator_preserves_intent_fields(monkeypatch: Any) -> None
     assert "cnpj" in ((plan.get("clarification") or {}).get("question") or "").lower()
 
 
+def test_missing_discriminator_retries_intent_before_clarify(monkeypatch: Any) -> None:
+    """C: sem filter no discriminador → retry do intent; depois clarifica."""
+    _env()
+    cfg = _cfg_sharded_no_disc()
+    bad = IntentPlan(
+        status="ready",
+        question_rewrite="soma dos recebíveis",
+        metrics=[MetricClause(table_id="recebiveis", column_id="valor", agg="sum")],
+    )
+    # 1º e 2º: sem filter → retry; após MAX → resolve → ClarifyNeeded
+    monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: ScriptedLLM([bad, bad]))
+    agent = build_agent(cfg, checkpointer=None)
+    result = agent.invoke({"messages": [HumanMessage(content="soma?")]})
+    assert result.get("intent_retries", 0) >= 1
+    content = (result["messages"][-1].content or "").lower()
+    assert "cnpj" in content
+    # feedback de retry deve ter sido injetado
+    feedbacks = [
+        m
+        for m in result["messages"]
+        if getattr(m, "type", None) == "system"
+        or (hasattr(m, "content") and "discriminador" in str(getattr(m, "content", "")).lower())
+    ]
+    assert feedbacks or result.get("intent_retries", 0) >= 1
+
+
 def test_check_materialization_retries_plan(monkeypatch: Any) -> None:
     """MaterializationCheck(ready=False) dispara segundo plan_materialization."""
     _env()

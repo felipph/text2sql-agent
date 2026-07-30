@@ -36,3 +36,4 @@ Chosen option: **resolver determinístico `(discriminador) → ShardResult`, fan
 
 **Neutral:**
 - Resolver é código do usuário (`modulo:funcao`), não hardcoded
+- Extração textual de discriminadores (quando o IntentPlan omite `filters`) também é adapter opcional via `sharding.value_extractor` — a lib não embute formatos de domínio (CNPJ/CPF/etc.)

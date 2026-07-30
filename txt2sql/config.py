@@ -64,10 +64,14 @@ class ShardingConfig:
         discriminator_column: Coluna cujo valor determina o shard físico.
         resolver: Caminho dotted importável no formato ``modulo.sub:funcao``
             apontando para um callable ``(str) -> ShardResult``.
+        value_extractor: Opcional. Caminho dotted para
+            ``(text: str) -> list[str]`` — fallback textual quando o IntentPlan
+            omite o discriminador em ``filters``. Domínio fica no adapter do app.
     """
 
     discriminator_column: str
     resolver: str
+    value_extractor: str | None = None
 
     def load_resolver(self) -> Callable[[str], ShardResult]:
         """Importa dinamicamente o callable resolver configurado.
@@ -80,17 +84,28 @@ class ShardingConfig:
             ImportError: Se o módulo não puder ser importado.
             AttributeError: Se a função não existir no módulo.
         """
-        if ":" not in self.resolver:
-            raise ValueError(
-                f"resolver deve estar no formato 'modulo.sub:funcao', recebido: {self.resolver!r}"
-            )
-        module_path, func_name = self.resolver.split(":", 1)
-        logger.debug("Importando resolver de shard: {}:{}", module_path, func_name)
-        module = importlib.import_module(module_path)
-        func = getattr(module, func_name)
-        if not callable(func):
-            raise TypeError(f"resolver {self.resolver!r} não é um callable")
-        return func
+        return load_dotted_callable(self.resolver, label="resolver")
+
+    def load_value_extractor(self) -> Callable[[str], list[str]] | None:
+        """Importa o extractor textual opcional ``(text) -> list[str]``."""
+        if not self.value_extractor:
+            return None
+        return load_dotted_callable(self.value_extractor, label="value_extractor")
+
+
+def load_dotted_callable(path: str, *, label: str = "callable") -> Callable[..., Any]:
+    """Importa um callable via caminho dotted ``modulo.sub:funcao``."""
+    if ":" not in path:
+        raise ValueError(
+            f"{label} deve estar no formato 'modulo.sub:funcao', recebido: {path!r}"
+        )
+    module_path, func_name = path.split(":", 1)
+    logger.debug("Importando {}: {}:{}", label, module_path, func_name)
+    module = importlib.import_module(module_path)
+    func = getattr(module, func_name)
+    if not callable(func):
+        raise TypeError(f"{label} {path!r} não é um callable")
+    return func
 
 
 @dataclass
@@ -419,6 +434,7 @@ def _parse_sharding(raw: dict[str, Any] | None) -> ShardingConfig | None:
     return ShardingConfig(
         discriminator_column=raw["discriminator_column"],
         resolver=raw["resolver"],
+        value_extractor=raw.get("value_extractor"),
     )
 
 

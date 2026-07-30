@@ -128,8 +128,8 @@ def _physical_in_duckdb_rejection(
 ) -> str | None:
     """Rejeita nomes físicos de shard quando o lógico já está no DuckDB.
 
-    O LLM às vezes gera ``UNION recebiveis_654 / recebiveis_747`` no dialect
-    duckdb — essas tabelas não existem na sessão; o fan-in usa o nome lógico.
+    O LLM às vezes gera ``UNION`` de tabelas físicas no dialect duckdb —
+    essas tabelas não existem na sessão; o fan-in usa o nome lógico.
     """
     if duckdb_catalog is None or not duckdb_catalog.tables:
         return None
@@ -158,8 +158,7 @@ def _physical_in_duckdb_rejection(
     return (
         f"SQL DuckDB referenciou nome(s) físico(s) de shard já materializado(s): "
         f"{pairs}. No path analítico use apenas o nome lógico do catálogo "
-        f"({logicals}) — nunca UNION de tabelas físicas "
-        f"(ex. recebiveis_654 UNION recebiveis_747)."
+        f"({logicals}) — nunca UNION de tabelas físicas."
     )
 
 

@@ -144,13 +144,11 @@ def routing_rejection_reason(refs: list[TableRef]) -> str | None:
         names = ", ".join(f"`{r.name}`" for r in unresolved)
         return (
             f"Tabela(s) shardada(s) referenciada(s) pelo nome lógico sem "
-            f"`resolve_shard` nem `materialize_sharded_table`: {names}. "
-            "Próximo passo: (1) liste os discriminadores com SELECT em tabela "
-            "NÃO shardada (ex. clientes.cnpj); (2) se 2+ valores chame "
-            "`materialize_sharded_table`, se 1 chame `resolve_shard`; "
-            "(3) só então consulte a shardada (nome lógico no DuckDB ou nome "
-            "físico no shard). Não faça JOIN cross-database; não responda só "
-            "com um pedaço irrelevante de outra tabela."
+            f"resolução de shard / fan-in: {names}. "
+            "Liste os valores do discriminador (via IntentPlan.filters ou query "
+            "em tabela não-shardada), resolva o(s) shard(s) e só então consulte "
+            "pelo nome lógico (DuckDB) ou nome físico no shard. Não faça JOIN "
+            "cross-database."
         )
 
     destinations: set[str] = set()
@@ -164,11 +162,9 @@ def routing_rejection_reason(refs: list[TableRef]) -> str | None:
         detail = ", ".join(sorted(destinations))
         return (
             "Consulta/JOIN cross-database não é permitida "
-            f"(destinos: {detail}). Próximo passo: consulte um destino por vez "
-            "— liste discriminadores na tabela não-shardada, materialize ou "
-            "resolva a shardada, filtre nela, e busque atributos (ex. razão "
-            "social) numa query separada em clientes. Não abandone o fluxo "
-            "com uma amostra LIMIT 1 sem responder a pergunta."
+            f"(destinos: {detail}). Consulte um destino por vez: resolva o "
+            "discriminador da tabela shardada, materialize ou consulte o "
+            "físico, e busque atributos de outras tabelas em query separada."
         )
 
     return None

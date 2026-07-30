@@ -1,35 +1,24 @@
-"""Exemplo de resolver de shard determinístico por CNPJ.
+"""Exemplo de resolver + value_extractor de shard (domínio: CNPJ).
 
-Um resolver é qualquer callable ``(discriminator_value: str) -> ShardResult``.
-Ele é referenciado no YAML via caminho dotted, por exemplo:
+Adapters referenciados no YAML — o core txt2sql não conhece CNPJ:
 
     sharding:
       discriminator_column: cnpj
       resolver: "examples.shard_resolver_example:resolve_cnpj_shard"
-
-A resolução deve ser **determinística**: o mesmo CNPJ sempre mapeia para o mesmo
-banco físico e o mesmo nome de tabela. Aqui usamos os 3 primeiros dígitos do
-CNPJ como sufixo da tabela (``recebiveis_000`` .. ``recebiveis_999``) e dividimos
-o espaço 000–999 em três shards físicos.
+      value_extractor: "examples.shard_resolver_example:extract_cnpj_values"
 """
 
 from __future__ import annotations
 
+import re
+
 from txt2sql.config import ShardResult
+
+_CNPJ_RE = re.compile(r"\b(\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2}|\d{14})\b")
 
 
 def _normalize_cnpj(cnpj: str) -> str:
-    """Remove formatação do CNPJ, deixando apenas dígitos.
-
-    Args:
-        cnpj: CNPJ possivelmente formatado (ex.: ``12.345.678/0001-90``).
-
-    Returns:
-        String contendo apenas os dígitos do CNPJ.
-
-    Raises:
-        ValueError: Se o CNPJ não contiver 14 dígitos.
-    """
+    """Remove formatação do CNPJ, deixando apenas dígitos."""
     digits = "".join(ch for ch in cnpj if ch.isdigit())
     if len(digits) != 14:
         raise ValueError(
@@ -48,12 +37,6 @@ def resolve_cnpj_shard(cnpj: str) -> ShardResult:
             - 000–333 -> ``db_shard_1``
             - 334–666 -> ``db_shard_2``
             - 667–999 -> ``db_shard_3``
-
-    Args:
-        cnpj: CNPJ do titular (formatado ou apenas dígitos).
-
-    Returns:
-        Um :class:`ShardResult` com o ``database_id`` e o ``table_name`` físicos.
     """
     digits = _normalize_cnpj(cnpj)
     prefix = digits[:3]
@@ -69,9 +52,25 @@ def resolve_cnpj_shard(cnpj: str) -> ShardResult:
     return ShardResult(database_id=database_id, table_name=f"recebiveis_{prefix}")
 
 
+def extract_cnpj_values(text: str) -> list[str]:
+    """Extrai CNPJs (14 dígitos) de texto livre — ``value_extractor`` do YAML."""
+    if not text:
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for match in _CNPJ_RE.finditer(text):
+        digits = "".join(ch for ch in match.group(1) if ch.isdigit())
+        if len(digits) != 14 or digits in seen:
+            continue
+        seen.add(digits)
+        out.append(digits)
+    return out
+
+
 if __name__ == "__main__":  # demonstração rápida
     for exemplo in ("12.345.678/0001-90", "400.000.000/0001-00", "99900000000000"):
         try:
             print(f"{exemplo!r:30} -> {resolve_cnpj_shard(exemplo)}")
         except ValueError as err:
             print(f"{exemplo!r:30} -> ERRO: {err}")
+    print("extract:", extract_cnpj_values("CNPJs 65410433218196 e 74778161849593"))

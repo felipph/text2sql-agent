@@ -51,6 +51,7 @@ docs/superpowers/  # Specs e plans de features (não é doc de produto)
 - Checkpointer **não** é criado pela lib — passe via `build_agent(..., checkpointer=...)`. HITL/resume exige checkpointer + `Command(resume=...)`.
 - Clarificação: `Budget.max_clarifications` (default 2); esgotado → `finish` com mensagem, sem SQL.
 - Sharding via `resolve_routing` determinístico; fan-in multi-shard via `db/fan_in.fan_in(bindings)`. Fan-out cego é proibido.
+- Discriminador em `filters` do IntentPlan; fallback textual opcional via `sharding.value_extractor` (callable do app, não da lib).
 - Sem `columns` no YAML → discovery no `database` de referência; com `columns` → declarativo.
 - Env vars de banco vêm de `connection_env` no YAML (ex.: `MAIN_DB_URL`), não de nomes fixos.
 - `AZURE_OPENAI_*` são obrigatórias se o bloco `llm` do YAML estiver incompleto.

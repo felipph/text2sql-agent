@@ -28,8 +28,8 @@ class ResolveShardInput(BaseModel):
     table_id: str = Field(description="ID lógico da tabela shardada (ex.: 'recebiveis').")
     discriminator_value: str = Field(
         description=(
-            "Valor do discriminador de shard (ex.: o CNPJ). Obrigatório — nunca "
-            "invente; se o usuário não forneceu, peça antes de chamar."
+            "Valor do discriminador de shard. Obrigatório — nunca invente; "
+            "se o usuário não forneceu, peça antes de chamar."
         )
     )
 
@@ -67,7 +67,7 @@ class ShardResolver:
 
         Args:
             table_id: ID lógico da tabela shardada.
-            value: Valor do discriminador (ex.: CNPJ).
+            value: Valor do discriminador.
 
         Returns:
             O :class:`ShardResult` com ``database_id`` e ``table_name`` físicos.

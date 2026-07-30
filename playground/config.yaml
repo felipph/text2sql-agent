@@ -35,6 +35,7 @@ tables:
     sharding:
       discriminator_column: cnpj
       resolver: "playground.shard_resolver:resolve_cnpj_shard"
+      value_extractor: "playground.shard_resolver:extract_cnpj_values"
     columns:
       - name: cnpj
         type: VARCHAR
@@ -80,7 +81,6 @@ llm:
 
 custom_section: |
   Playground de testes. recebiveis é SHARDADA por CNPJ (2 shards).
-  1 CNPJ → resolve_shard; 2+ → materialize_sharded_table + nome lógico.
-  Sem discriminador na pergunta: liste CNPJs em clientes, materialize/resolva,
-  filtre recebiveis, depois busque razão social — NUNCA JOIN cross-database.
-  NUNCA faça fan-out cego sem lista de discriminadores.
+  Inclua o CNPJ em IntentPlan.filters (eq/in). Sem discriminador na pergunta:
+  peça clarificação. NUNCA faça fan-out cego sem lista de discriminadores.
+  NUNCA JOIN cross-database entre clientes e recebiveis.

@@ -52,9 +52,10 @@ def test_reject_logical_sharded_join_with_main() -> None:
     refs = analyze_table_refs(sql, cfg, {}, {}, "postgres")
     reason = routing_rejection_reason(refs)
     assert reason is not None
-    assert "shardada" in reason.lower() or "resolve_shard" in reason
-    assert "materialize_sharded_table" in reason
-    assert "Próximo passo" in reason
+    assert "shardada" in reason.lower()
+    assert "discriminador" in reason.lower() or "cross-database" in reason.lower()
+    assert "materialize_sharded_table" not in reason
+    assert "resolve_shard" not in reason
 
 
 def test_reject_cross_db_after_resolve() -> None:

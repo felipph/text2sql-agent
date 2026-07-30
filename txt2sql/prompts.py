@@ -71,10 +71,10 @@ class Txt2SqlPromptBuilder:
                     "### Tabelas shardadas (discriminador OBRIGATÓRIO em filters)",
                     f"Tabelas shardadas e discriminadores: {disc_lines}.",
                     "- Se a pergunta (ou o histórico) JÁ traz o valor do discriminador "
-                    "(ex.: CNPJ), use status=ready E inclua FilterClause em ``filters`` "
-                    "com esse valor (op=eq para um valor, op=in para vários).",
+                    "da coluna indicada acima, use status=ready E inclua FilterClause "
+                    "em ``filters`` com esse valor (op=eq para um valor, op=in para vários).",
                     "- NUNCA deixe o discriminador só no question_rewrite — sem "
-                    "``filters`` o roteamento pede o valor de novo ao usuário.",
+                    "``filters`` o roteamento pedirá o valor de novo ao usuário.",
                     "- Só use needs_clarification pedindo o discriminador quando ele "
                     "realmente NÃO aparece na pergunta nem no histórico.",
                 ]
@@ -198,7 +198,7 @@ class Txt2SqlPromptBuilder:
             (
                 "3. Quando a pergunta envolver 2+ discriminadores, o sistema fará fan-in "
                 "automático no DuckDB e você receberá o resultado pelo nome lógico da "
-                "tabela (ex.: `recebiveis`). Analise pelo nome lógico."
+                "tabela. Analise pelo nome lógico (table_id da config)."
             ),
             (
                 "4. NUNCA faça JOIN misturando tabela não-shardada e shardada na mesma "
@@ -207,8 +207,8 @@ class Txt2SqlPromptBuilder:
             ),
             (
                 "5. Se o discriminador não consta na pergunta mas pode ser descoberto via "
-                "query em outra tabela (ex.: `SELECT cnpj FROM clientes`), inclua essa "
-                "dependência no IntentPlan antes de consultar a tabela shardada."
+                "query em outra tabela, inclua essa dependência no IntentPlan antes de "
+                "consultar a tabela shardada."
             ),
             "",
             "Discriminadores por tabela:",

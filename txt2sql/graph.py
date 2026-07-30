@@ -55,6 +55,7 @@ from txt2sql.query_routing import extract_table_names
 from txt2sql.shard_routing import (
     ClarifyNeeded,
     ensure_discriminator_filters,
+    missing_discriminator_filter_errors,
     resolve_routing,
 )
 
@@ -463,42 +464,62 @@ def build_graph(
             }
 
         validation = validate_intent(plan, schema_loader.get_column_index())
-        if validation.ok:
+        if not validation.ok:
+            retries = int(state.get("intent_retries", 0)) + 1
+            errors_txt = "; ".join(validation.errors) or (parse_error or "plan inválido")
+            if retries >= MAX_INTENT_RETRIES:
+                clarify = IntentPlan(
+                    status="needs_clarification",
+                    question_rewrite=plan.question_rewrite,
+                    clarification=Clarification(
+                        question=(
+                            "Não consegui mapear a pergunta ao schema. "
+                            f"Problemas: {errors_txt}. Pode reformular ou esclarecer?"
+                        )
+                    ),
+                )
+                return {
+                    "intent_plan": clarify.model_dump(),
+                    "intent_retries": retries,
+                    "intent_route": "ask_clarification",
+                }
+
+            feedback = SystemMessage(
+                content=(
+                    "O IntentPlan anterior é inválido em relação ao schema. "
+                    f"Corrija e tente de novo. Erros: {errors_txt}"
+                )
+            )
             return {
+                "messages": [feedback],
                 "intent_plan": plan.model_dump(),
-                "intent_route": "resolve_and_route",
-            }
-
-        retries = int(state.get("intent_retries", 0)) + 1
-        errors_txt = "; ".join(validation.errors) or (parse_error or "plan inválido")
-        if retries >= MAX_INTENT_RETRIES:
-            clarify = IntentPlan(
-                status="needs_clarification",
-                question_rewrite=plan.question_rewrite,
-                clarification=Clarification(
-                    question=(
-                        "Não consegui mapear a pergunta ao schema. "
-                        f"Problemas: {errors_txt}. Pode reformular ou esclarecer?"
-                    )
-                ),
-            )
-            return {
-                "intent_plan": clarify.model_dump(),
                 "intent_retries": retries,
-                "intent_route": "ask_clarification",
+                "intent_route": "interpret_intent",
             }
 
-        feedback = SystemMessage(
-            content=(
-                "O IntentPlan anterior é inválido em relação ao schema. "
-                f"Corrija e tente de novo. Erros: {errors_txt}"
-            )
-        )
+        # C: grounding do discriminador em filters — retry antes de clarificar
+        disc_errors = missing_discriminator_filter_errors(plan, config)
+        if disc_errors:
+            retries = int(state.get("intent_retries", 0)) + 1
+            if retries < MAX_INTENT_RETRIES:
+                feedback = SystemMessage(
+                    content=(
+                        "O IntentPlan está ready mas falta o discriminador de shard "
+                        "em filters. Corrija e tente de novo. "
+                        + " ".join(disc_errors)
+                    )
+                )
+                return {
+                    "messages": [feedback],
+                    "intent_plan": plan.model_dump(),
+                    "intent_retries": retries,
+                    "intent_route": "interpret_intent",
+                }
+            # retries esgotados → resolve_and_route (value_extractor / ClarifyNeeded)
+
         return {
-            "messages": [feedback],
             "intent_plan": plan.model_dump(),
-            "intent_retries": retries,
-            "intent_route": "interpret_intent",
+            "intent_route": "resolve_and_route",
         }
 
     def ask_clarification(state: GraphState) -> dict[str, Any]:
