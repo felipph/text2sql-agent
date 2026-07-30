@@ -58,6 +58,12 @@ from txt2sql.shard_routing import (
     missing_discriminator_filter_errors,
     resolve_routing,
 )
+from txt2sql.sufficiency import (
+    SufficiencyDecision,
+    build_deterministic_mat_plan,
+    evaluate_sufficiency,
+    intent_table_ids,
+)
 
 MAX_INTENT_RETRIES = 2
 CLARIFICATION_EXHAUSTED = (
@@ -82,19 +88,20 @@ class MaterializationCheck(BaseModel):
 class GraphState(MessagesState):
     """Estado do grafo dual-path."""
 
-    intent_plan: dict[str, Any] | None
+    intent_plan: IntentPlan | None
     intent_retries: int
     intent_route: str
     execution_path: str
-    shard_routing: dict[str, Any] | None
-    sql_plan: dict[str, Any] | None
-    materialization_plan: dict[str, Any] | None
-    last_result: dict[str, Any] | None
+    shard_routing: ShardRouting | None
+    sql_plan: SQLPlan | None
+    materialization_plan: MaterializationPlan | None
+    last_result: ExecutionResult | None
     executed_sql_history: list[str]
-    verify_decision: dict[str, Any] | None
-    duckdb_catalog: dict[str, Any]
-    budget: dict[str, Any]
+    verify_decision: VerifyDecision | None
+    duckdb_catalog: DuckDBCatalog
+    budget: Budget
     gate_action: str
+    sufficiency_decision: SufficiencyDecision | None
     mat_ready: bool
     partial: bool
     final_answer: str | None
@@ -109,53 +116,81 @@ def _dump_json(obj: Any, *, indent: int | None = None) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=indent, default=str)
 
 
+def _coerce_model[T: BaseModel](raw: Any, model: type[T], *, default: T | None = None) -> T:
+    """Normaliza instância ou dict (checkpoint) para modelo Pydantic."""
+    if isinstance(raw, model):
+        return raw
+    if raw is None:
+        if default is not None:
+            return default
+        return model()
+    return model.model_validate(raw)
+
+
 def _coerce_intent_plan(raw: Any) -> IntentPlan:
     if isinstance(raw, IntentPlan):
         return raw
-    if isinstance(raw, dict):
-        return IntentPlan.model_validate(raw)
     return IntentPlan.model_validate(raw)
 
 
 def _budget(state: GraphState) -> Budget:
-    raw = state.get("budget")
-    return Budget.model_validate(raw) if raw else Budget()
+    return _coerce_model(state.get("budget"), Budget, default=Budget())
 
 
 def _shard_routing(state: GraphState) -> ShardRouting:
-    raw = state.get("shard_routing")
-    return ShardRouting.model_validate(raw) if raw else ShardRouting()
+    return _coerce_model(state.get("shard_routing"), ShardRouting, default=ShardRouting())
 
 
 def _catalog(state: GraphState) -> DuckDBCatalog:
-    raw = state.get("duckdb_catalog")
-    return DuckDBCatalog.model_validate(raw) if raw else DuckDBCatalog()
+    return _coerce_model(state.get("duckdb_catalog"), DuckDBCatalog, default=DuckDBCatalog())
+
+
+def _sql_plan(state: GraphState) -> SQLPlan | None:
+    raw = state.get("sql_plan")
+    if raw is None:
+        return None
+    return _coerce_model(raw, SQLPlan)
+
+
+def _last_result(state: GraphState) -> ExecutionResult | None:
+    raw = state.get("last_result")
+    if raw is None:
+        return None
+    return _coerce_model(raw, ExecutionResult)
+
+
+def _verify_decision(state: GraphState) -> VerifyDecision | None:
+    raw = state.get("verify_decision")
+    if raw is None:
+        return None
+    return _coerce_model(raw, VerifyDecision)
+
+
+def _materialization_plan(state: GraphState) -> MaterializationPlan | None:
+    raw = state.get("materialization_plan")
+    if raw is None:
+        return None
+    return _coerce_model(raw, MaterializationPlan)
 
 
 def _intent_had_metrics(state: GraphState) -> bool:
-    plan = state.get("intent_plan") or {}
-    metrics = plan.get("metrics") or []
-    return bool(metrics)
+    raw = state.get("intent_plan")
+    if raw is None:
+        return False
+    plan = _coerce_intent_plan(raw)
+    return bool(plan.metrics)
 
 
 def _intent_table_ids(plan: IntentPlan) -> set[str]:
     """Tabelas lógicas tocadas pelo IntentPlan."""
-    ids: set[str] = set()
-    for f in plan.filters:
-        ids.add(f.table_id)
-    for m in plan.metrics:
-        ids.add(m.table_id)
-    for g in plan.group_by:
-        ids.add(g.table_id)
-    for j in plan.joins:
-        ids.add(j.from_table_id)
-        ids.add(j.to_table_id)
-    for e in plan.entities:
-        if e.table_id:
-            ids.add(e.table_id)
-    for o in plan.order_by:
-        ids.add(o.table_id)
-    return ids
+    return intent_table_ids(plan)
+
+
+def _sufficiency_decision(state: GraphState) -> SufficiencyDecision | None:
+    raw = state.get("sufficiency_decision")
+    if raw is None:
+        return None
+    return _coerce_model(raw, SufficiencyDecision)
 
 
 def _table_ids_from_mat_plan(
@@ -179,26 +214,6 @@ def _table_ids_from_mat_plan(
             if name in by_name:
                 ids.add(by_name[name])
     return ids
-
-
-def _catalog_covers_tables(
-    catalog: DuckDBCatalog,
-    table_ids: set[str],
-    agent_config: AgentConfig,
-) -> bool:
-    """True se cada table_id do intent tem entrada no catálogo (id ou name)."""
-    if not table_ids:
-        return bool(catalog.tables)
-    catalog_names = {t.name.lower() for t in catalog.tables}
-    for tid in table_ids:
-        names = {tid.lower()}
-        table = agent_config.try_get_table(tid)
-        if table is not None:
-            names.add(table.name.lower())
-            names.add(table.id.lower())
-        if not names.intersection(catalog_names):
-            return False
-    return True
 
 
 def _last_human_text(state: dict[str, Any]) -> str:
@@ -283,34 +298,38 @@ def _bindings_for_table(
     return []
 
 
-
-
 def _append_provenance_footer(
     text: str,
     *,
     sql_history: list[str],
     assumptions: list[str],
     partial: bool,
-    last_result: dict[str, Any],
+    last_result: ExecutionResult | dict[str, Any] | None,
 ) -> str:
     """Anexa bloco de proveniência se o LLM não incluiu '---'."""
     if "---" in text:
         return text
+    result: ExecutionResult | None = None
+    if isinstance(last_result, ExecutionResult):
+        result = last_result
+    elif last_result:
+        result = ExecutionResult.model_validate(last_result)
     lines: list[str] = []
     if sql_history:
         lines.append("SQL: " + "; ".join(sql_history))
     if assumptions:
         lines.append("Assunções: " + "; ".join(assumptions))
     lines.append(f"Parcial: {'sim' if partial else 'não'}")
-    status = last_result.get("status") or ""
-    warnings = last_result.get("warnings") or []
-    if status:
-        detail = status
-        if warnings:
-            detail += f" — {', '.join(str(w) for w in warnings)}"
-        lines.append(f"Status: {detail}")
-    elif warnings:
-        lines.append(f"Avisos: {', '.join(str(w) for w in warnings)}")
+    if result is not None:
+        status = result.status or ""
+        warnings = result.warnings or []
+        if status:
+            detail = status
+            if warnings:
+                detail += f" — {', '.join(str(w) for w in warnings)}"
+            lines.append(f"Status: {detail}")
+        elif warnings:
+            lines.append(f"Avisos: {', '.join(str(w) for w in warnings)}")
     if not lines:
         return text
     return text.rstrip() + "\n\n---\n" + "\n".join(lines)
@@ -352,40 +371,51 @@ def build_graph(
     session_store: DuckDBSessionStore | None = None,
 ) -> CompiledStateGraph:
     """Compila o grafo dual-path."""
-    registry = DatabaseRegistry(config)
-    schema_loader = SchemaLoader(config, registry)
-    prompt_builder = Txt2SqlPromptBuilder(config)
+    agent_config = config
+    registry = DatabaseRegistry(agent_config)
+    schema_loader = SchemaLoader(agent_config, registry)
+    prompt_builder = Txt2SqlPromptBuilder(agent_config)
     intent_prompt = prompt_builder.build_intent_prompt(schema_loader=schema_loader)
+    logger.debug(f"Intent prompt: {intent_prompt}")
     has_checkpointer = checkpointer is not None
 
     if session_store is None:
         session_store = DuckDBSessionStore(Path(tempfile.mkdtemp(prefix="txt2sql_duckdb_")))
 
-    llm = build_llm(config)
+    llm = build_llm(agent_config)
     # function_calling: schemas com Optionals/aninhados passam no Azure OpenAI;
     # json_schema estrito rejeita dict livre (ex. params) e alguns defaults.
     intent_llm = llm.with_structured_output(IntentPlan)
     sql_llm = llm.with_structured_output(SQLPlan, method="function_calling")
     mat_llm = llm.with_structured_output(MaterializationPlan, method="function_calling")
-    mat_check_llm = llm.with_structured_output(
-        MaterializationCheck, method="function_calling"
-    )
+    mat_check_llm = llm.with_structured_output(MaterializationCheck, method="function_calling")
     verify_llm = llm.with_structured_output(VerifyDecision, method="function_calling")
     gate_llm = llm.with_structured_output(GateDecision, method="function_calling")
     answer_llm = llm
 
-    default_dialect = config.dialect
+    default_dialect = agent_config.dialect
+
+    def _thread_id(run_config: RunnableConfig) -> str:
+        configurable = run_config.get("configurable") or {}
+        return str(configurable.get("thread_id") or "default")
+
+    def _ensure_duckdb_session(state: GraphState, run_config: RunnableConfig) -> DuckDBSession:
+        """Reconecta sessão file-backed (UntrackedValue some no resume HITL)."""
+        session = state.get("duckdb_session")
+        if session is not None:
+            return session
+        return session_store.get(_thread_id(run_config))
 
     def init_state(state: GraphState, config: RunnableConfig) -> dict[str, Any]:
-        configurable = config.get("configurable") or {}
-        thread_id = str(configurable.get("thread_id") or "default")
+        thread_id = _thread_id(config)
         session = session_store.get(thread_id)
 
         prev_catalog = state.get("duckdb_catalog")
-        if prev_catalog:
-            catalog_dump = prev_catalog
-        else:
-            catalog_dump = DuckDBCatalog().model_dump(by_alias=True)
+        catalog = (
+            _coerce_model(prev_catalog, DuckDBCatalog, default=DuckDBCatalog())
+            if prev_catalog
+            else DuckDBCatalog()
+        )
 
         prev_budget = _budget(state)
         budget = Budget(
@@ -405,9 +435,10 @@ def build_graph(
             "last_result": None,
             "executed_sql_history": [],
             "verify_decision": None,
-            "duckdb_catalog": catalog_dump,
-            "budget": budget.model_dump(),
+            "duckdb_catalog": catalog,
+            "budget": budget,
             "gate_action": "",
+            "sufficiency_decision": None,
             "mat_ready": False,
             "partial": False,
             "final_answer": None,
@@ -453,13 +484,13 @@ def build_graph(
             budget = _budget(state)
             if budget.exhausted("clarification_count"):
                 return {
-                    "intent_plan": plan.model_dump(),
+                    "intent_plan": plan,
                     "intent_route": "finish",
                     "final_answer": CLARIFICATION_EXHAUSTED,
                     "messages": [AIMessage(content=CLARIFICATION_EXHAUSTED)],
                 }
             return {
-                "intent_plan": plan.model_dump(),
+                "intent_plan": plan,
                 "intent_route": "ask_clarification",
             }
 
@@ -479,7 +510,7 @@ def build_graph(
                     ),
                 )
                 return {
-                    "intent_plan": clarify.model_dump(),
+                    "intent_plan": clarify,
                     "intent_retries": retries,
                     "intent_route": "ask_clarification",
                 }
@@ -492,7 +523,7 @@ def build_graph(
             )
             return {
                 "messages": [feedback],
-                "intent_plan": plan.model_dump(),
+                "intent_plan": plan,
                 "intent_retries": retries,
                 "intent_route": "interpret_intent",
             }
@@ -505,28 +536,31 @@ def build_graph(
                 feedback = SystemMessage(
                     content=(
                         "O IntentPlan está ready mas falta o discriminador de shard "
-                        "em filters. Corrija e tente de novo. "
-                        + " ".join(disc_errors)
+                        "em filters. Corrija e tente de novo. " + " ".join(disc_errors)
                     )
                 )
                 return {
                     "messages": [feedback],
-                    "intent_plan": plan.model_dump(),
+                    "intent_plan": plan,
                     "intent_retries": retries,
                     "intent_route": "interpret_intent",
                 }
             # retries esgotados → resolve_and_route (value_extractor / ClarifyNeeded)
 
         return {
-            "intent_plan": plan.model_dump(),
+            "intent_plan": plan,
             "intent_route": "resolve_and_route",
         }
 
-    def ask_clarification(state: GraphState) -> dict[str, Any]:
-        plan_raw = state.get("intent_plan") or {}
-        clarification = plan_raw.get("clarification") or {}
-        question = clarification.get("question") or "Pode esclarecer a pergunta?"
-        options = clarification.get("options") or []
+    def ask_clarification(state: GraphState, config: RunnableConfig) -> dict[str, Any]:
+        plan = _coerce_intent_plan(state.get("intent_plan"))
+        clarification = plan.clarification
+        question = (
+            clarification.question
+            if clarification and clarification.question.strip()
+            else "Pode esclarecer a pergunta?"
+        )
+        options = list(clarification.options) if clarification else []
         logger.info("ask_clarification: {}", question[:120])
 
         budget = _budget(state)
@@ -537,9 +571,7 @@ def build_graph(
                 "messages": [AIMessage(content=CLARIFICATION_EXHAUSTED)],
             }
 
-        budget = budget.model_copy(
-            update={"clarification_count": budget.clarification_count + 1}
-        )
+        budget = budget.model_copy(update={"clarification_count": budget.clarification_count + 1})
 
         if has_checkpointer:
             answer = interrupt(
@@ -549,10 +581,12 @@ def build_graph(
                     "options": options,
                 }
             )
+            # Resume não passa por init_state — rehidrata UntrackedValue
             return {
                 "messages": [HumanMessage(content=str(answer))],
-                "budget": budget.model_dump(),
+                "budget": budget,
                 "final_answer": None,
+                "duckdb_session": _ensure_duckdb_session(state, config),
             }
 
         text = question
@@ -560,7 +594,7 @@ def build_graph(
             text = question + "\nOpções: " + ", ".join(str(o) for o in options)
         return {
             "messages": [AIMessage(content=text)],
-            "budget": budget.model_dump(),
+            "budget": budget,
             "final_answer": None,
         }
 
@@ -571,9 +605,7 @@ def build_graph(
 
     def resolve_and_route(state: GraphState) -> dict[str, Any]:
         plan = _coerce_intent_plan(state.get("intent_plan"))
-        routing_result = resolve_routing(
-            plan, config, extra_text=_last_human_text(state)
-        )
+        routing_result = resolve_routing(plan, config, extra_text=_last_human_text(state))
         if isinstance(routing_result, ClarifyNeeded):
             clarify = plan.model_copy(
                 update={
@@ -584,21 +616,21 @@ def build_graph(
             budget = _budget(state)
             if budget.exhausted("clarification_count"):
                 return {
-                    "intent_plan": clarify.model_dump(),
+                    "intent_plan": clarify,
                     "intent_route": "finish",
                     "final_answer": CLARIFICATION_EXHAUSTED,
                     "messages": [AIMessage(content=CLARIFICATION_EXHAUSTED)],
                 }
             return {
-                "intent_plan": clarify.model_dump(),
+                "intent_plan": clarify,
                 "intent_route": "ask_clarification",
             }
         plan = ensure_discriminator_filters(plan, routing_result, config)
         path = route_execution(plan, routing_result, config)
         logger.info("resolve_and_route: path={} shard_mode={}", path, routing_result.mode)
         return {
-            "intent_plan": plan.model_dump(),
-            "shard_routing": routing_result.model_dump(),
+            "intent_plan": plan,
+            "shard_routing": routing_result,
             "execution_path": path,
             "intent_route": path,
         }
@@ -611,16 +643,18 @@ def build_graph(
             f"IntentPlan:\n{_dump_json(plan, indent=2)}\n"
             f"ShardRouting:\n{_dump_json(shard, indent=2)}"
         )
-        last = state.get("last_result") or {}
-        if last.get("status") == "rejected":
-            context += f"\nErro anterior: {last.get('error')}"
+        last = _last_result(state)
+        if last is not None and last.status == "rejected":
+            context += f"\nErro anterior: {last.error}"
         sql_plan = sql_llm.invoke([SystemMessage(content=context), *state["messages"]])
         if isinstance(sql_plan, dict):
             sql_plan = SQLPlan.model_validate(sql_plan)
-        return {"sql_plan": sql_plan.model_dump()}
+        return {"sql_plan": sql_plan}
 
     def exec_source(state: GraphState) -> dict[str, Any]:
-        sql_plan = SQLPlan.model_validate(state["sql_plan"])
+        sql_plan = _sql_plan(state)
+        if sql_plan is None:
+            return {"last_result": ExecutionResult(status="error", error="sql_plan ausente")}
         shard = _shard_routing(state)
         budget = _budget(state)
         decision = check_sql_plan(
@@ -632,22 +666,16 @@ def build_graph(
             dialect=default_dialect,
         )
         if decision.status == "rejected":
-            return {
-                "last_result": result_from_rejection(decision.error or "rejeitado").model_dump(
-                    by_alias=True
-                )
-            }
+            return {"last_result": result_from_rejection(decision.error or "rejeitado")}
 
         database_id = _resolve_database_id(config, shard, decision.sql)
         try:
             rows = registry.execute(database_id, decision.sql)
         except QueryTimeoutError as err:
-            return {"last_result": result_from_timeout(str(err)).model_dump(by_alias=True)}
+            return {"last_result": result_from_timeout(str(err))}
         except Exception as err:  # noqa: BLE001
             return {
-                "last_result": ExecutionResult(status="error", error=str(err)).model_dump(
-                    by_alias=True
-                ),
+                "last_result": ExecutionResult(status="error", error=str(err)),
             }
 
         result = _compact_from_state(
@@ -659,41 +687,70 @@ def build_graph(
         history = list(state.get("executed_sql_history") or [])
         history.append(decision.sql)
         return {
-            "last_result": result.model_dump(by_alias=True),
+            "last_result": result,
             "executed_sql_history": history,
         }
 
-    def sufficiency_gate(state: GraphState) -> dict[str, Any]:
+    def sufficiency_gate(state: GraphState, config: RunnableConfig) -> dict[str, Any]:
         catalog = _catalog(state)
         budget = _budget(state)
+        session = _ensure_duckdb_session(state, config)
         if budget.exhausted("gate_visits"):
-            return {"gate_action": "refresh", "budget": budget.model_dump()}
+            return {
+                "gate_action": "refresh",
+                "budget": budget,
+                "duckdb_session": session,
+            }
         plan = _coerce_intent_plan(state.get("intent_plan"))
-        context = (
-            "Decida se o DuckDBCatalog cobre o IntentPlan (reuse) ou precisa refresh.\n"
-            f"IntentPlan:\n{_dump_json(plan)}\n"
-            f"Catalog:\n{_dump_json(catalog)}"
-        )
-        gate = gate_llm.invoke([SystemMessage(content=context)])
-        if isinstance(gate, dict):
-            gate = GateDecision.model_validate(gate)
-        elif not isinstance(gate, GateDecision):
-            gate = GateDecision(action=getattr(gate, "action", "refresh"))
+        shard = _shard_routing(state)
+        decision = evaluate_sufficiency(plan, shard, catalog, agent_config, dialect=default_dialect)
+        if decision.action == "unknown":
+            context = (
+                "Decida se o DuckDBCatalog cobre o IntentPlan (reuse) ou precisa refresh.\n"
+                f"Diagnóstico determinístico:\n{_dump_json(decision.reasons)}\n"
+                f"IntentPlan:\n{_dump_json(plan)}\n"
+                f"Catalog:\n{_dump_json(catalog)}"
+            )
+            logger.debug("System Prompt do sufficiency_gate (fallback LLM): {}", context)
+            gate = gate_llm.invoke([SystemMessage(content=context)])
+            if isinstance(gate, dict):
+                gate = GateDecision.model_validate(gate)
+            elif not isinstance(gate, GateDecision):
+                gate = GateDecision(action=getattr(gate, "action", "refresh"))
+            action: Literal["reuse", "refresh"] = (
+                gate.action if gate.action in {"reuse", "refresh"} else "refresh"
+            )
+            decision = SufficiencyDecision(
+                action=action,
+                gaps=decision.gaps,
+                reasons=decision.reasons,
+            )
+        gate_action = decision.action if decision.action in {"reuse", "refresh"} else "refresh"
         return {
-            "gate_action": gate.action,
-            "budget": budget.model_copy(
-                update={"gate_visits": budget.gate_visits + 1}
-            ).model_dump(),
+            "gate_action": gate_action,
+            "sufficiency_decision": decision,
+            "budget": budget.model_copy(update={"gate_visits": budget.gate_visits + 1}),
+            "duckdb_session": session,
         }
 
     def plan_materialization(state: GraphState) -> dict[str, Any]:
         plan = _coerce_intent_plan(state.get("intent_plan"))
         shard = _shard_routing(state)
+        catalog = _catalog(state)
+        decision = _sufficiency_decision(state)
+        if decision is not None:
+            det = build_deterministic_mat_plan(decision, catalog, config)
+            if det is not None:
+                return {"materialization_plan": det}
         logical_ids = sorted(_intent_table_ids(plan)) or [t.id for t in config.tables]
+        gaps_blob = ""
+        if decision is not None and decision.gaps:
+            gaps_blob = f"Gaps (materializar só o necessário):\n{_dump_json(decision.gaps)}\n"
         context = (
             "Gere MaterializationPlan com extracts filtrados (sem agregação pesada na origem).\n"
             "IMPORTANTE: target_table DEVE ser exatamente um table_id lógico da config "
             f"({logical_ids}). Não invente nomes como 'recebiveis_filtered_…'.\n"
+            f"{gaps_blob}"
             f"IntentPlan:\n{_dump_json(plan, indent=2)}\n"
             f"ShardRouting:\n{_dump_json(shard, indent=2)}"
         )
@@ -704,14 +761,18 @@ def build_graph(
             mat = MaterializationPlan.model_validate(mat)
         else:
             mat = MaterializationPlan.model_validate(mat)
-        return {"materialization_plan": mat.model_dump()}
+        return {"materialization_plan": mat}
 
-    def materialize(state: GraphState) -> dict[str, Any]:
-        mat_plan = MaterializationPlan.model_validate(state["materialization_plan"])
+    def materialize(state: GraphState, config: RunnableConfig) -> dict[str, Any]:
+        mat_plan = _materialization_plan(state)
+        if mat_plan is None:
+            return {
+                "last_result": ExecutionResult(status="error", error="materialization_plan ausente")
+            }
         shard = _shard_routing(state)
         budget = _budget(state)
         catalog = _catalog(state)
-        session = state.get("duckdb_session") or DuckDBSession()
+        session = _ensure_duckdb_session(state, config)
         total_rows = 0
         last_rows: list[dict[str, Any]] = []
         intent = _coerce_intent_plan(state.get("intent_plan"))
@@ -723,9 +784,7 @@ def build_graph(
                 name=logical_name,
                 row_count=rows,
                 source_queries=queries,
-                shard_bindings=[
-                    b for b in shard.bindings if b.table_id == logical_name
-                ],
+                shard_bindings=[b for b in shard.bindings if b.table_id == logical_name],
                 materialized_at=datetime.now(UTC),
             )
             catalog = DuckDBCatalog(
@@ -758,9 +817,7 @@ def build_graph(
                 source_queries_by_table[logical_name] = queries or [
                     f"fan-in:{len(bindings)} bindings"
                 ]
-                _upsert_catalog(
-                    logical_name, total_rows, source_queries_by_table[logical_name]
-                )
+                _upsert_catalog(logical_name, total_rows, source_queries_by_table[logical_name])
                 return None
 
             if table.is_sharded and len(bindings) == 1:
@@ -768,9 +825,7 @@ def build_graph(
                 source_engine = registry.get_engine(binding.database_id)
                 disc_col = table.sharding.discriminator_column if table.sharding else None
                 filt = (
-                    build_in_filter(disc_col, [binding.discriminator_value])
-                    if disc_col
-                    else None
+                    build_in_filter(disc_col, [binding.discriminator_value]) if disc_col else None
                 )
                 session.materialize(
                     table,
@@ -780,16 +835,12 @@ def build_graph(
                     replace=True,
                 )
                 last_rows = session.execute(f'SELECT * FROM "{logical_name}" LIMIT 5')
-                count_rows = session.execute(
-                    f'SELECT COUNT(*) AS n FROM "{logical_name}"'
-                )
+                count_rows = session.execute(f'SELECT COUNT(*) AS n FROM "{logical_name}"')
                 total_rows = int(count_rows[0]["n"]) if count_rows else len(last_rows)
                 source_queries_by_table[logical_name] = queries or [
                     f"SELECT * FROM {binding.physical_table}"
                 ]
-                _upsert_catalog(
-                    logical_name, total_rows, source_queries_by_table[logical_name]
-                )
+                _upsert_catalog(logical_name, total_rows, source_queries_by_table[logical_name])
                 return None
 
             # Não-shardada (ou shardada sem binding — extract via SQL do plano)
@@ -804,7 +855,7 @@ def build_graph(
             )
             decision = check_sql_plan(
                 extract_plan,
-                config=config,
+                config=agent_config,
                 shard_routing=shard,
                 path="analytical",
                 context="source_extract",
@@ -829,14 +880,12 @@ def build_graph(
         for step in mat_plan.steps:
             try:
                 table = _resolve_step_table(
-                    step, shard=shard, intent=intent, agent_config=config
+                    step, shard=shard, intent=intent, agent_config=agent_config
                 )
             except KeyError as err:
                 return {
                     "duckdb_session": session,
-                    "last_result": result_from_rejection(str(err)).model_dump(
-                        by_alias=True
-                    ),
+                    "last_result": result_from_rejection(str(err)),
                 }
             err = _materialize_one(table, step)
             if err is not None:
@@ -846,20 +895,20 @@ def build_graph(
                     payload = result_from_rejection(err)
                 return {
                     "duckdb_session": session,
-                    "last_result": payload.model_dump(by_alias=True),
+                    "last_result": payload,
                 }
             planned_ids.append(table.id)
 
         # Completa tabelas do intent / plano ausentes (ex.: JOIN com clientes)
         needed = _intent_table_ids(intent) | _table_ids_from_mat_plan(
-            mat_plan, config, default_dialect
+            mat_plan, agent_config, default_dialect
         )
         for tid in sorted(needed):
             if tid in planned_ids:
                 continue
             if any(t.name == tid for t in catalog.tables):
                 continue
-            table = config.try_get_table(tid)
+            table = agent_config.try_get_table(tid)
             if table is None or not table.uses_duckdb:
                 continue
             err = _materialize_one(table, step=None)
@@ -870,16 +919,16 @@ def build_graph(
                     payload = result_from_rejection(err)
                 return {
                     "duckdb_session": session,
-                    "last_result": payload.model_dump(by_alias=True),
+                    "last_result": payload,
                 }
 
         mat_budget = budget.model_copy(update={"mat_loop_count": budget.mat_loop_count + 1})
         result = _compact_from_state(state, last_rows, mat_budget, session=session)
         return {
             "duckdb_session": session,
-            "duckdb_catalog": catalog.model_dump(by_alias=True),
-            "budget": mat_budget.model_dump(),
-            "last_result": result.model_dump(by_alias=True),
+            "duckdb_catalog": catalog,
+            "budget": mat_budget,
+            "last_result": result,
         }
 
     def check_materialization(state: GraphState) -> dict[str, Any]:
@@ -887,32 +936,47 @@ def build_graph(
         if budget.exhausted("mat_loop_count"):
             return {"mat_ready": True, "partial": True}
 
-        last = state.get("last_result") or {}
-        last_status = last.get("status", "ok")
+        last = _last_result(state)
+        last_status = last.status if last is not None else "ok"
         if last_status in {"rejected", "timeout", "error"}:
             return {"mat_ready": False, "partial": False}
 
         plan = _coerce_intent_plan(state.get("intent_plan"))
         catalog = _catalog(state)
-        table_ids = _intent_table_ids(plan)
-
-        if _catalog_covers_tables(catalog, table_ids, config):
-            return {"mat_ready": True, "partial": False}
+        shard = _shard_routing(state)
+        decision = evaluate_sufficiency(plan, shard, catalog, agent_config, dialect=default_dialect)
+        if decision.action == "reuse":
+            return {
+                "mat_ready": True,
+                "partial": False,
+                "sufficiency_decision": decision,
+            }
+        if decision.action == "refresh":
+            return {
+                "mat_ready": False,
+                "partial": False,
+                "sufficiency_decision": decision,
+            }
 
         context = (
             "Avalie se o DuckDBCatalog cobre o IntentPlan para gerar SQL analítico.\n"
+            f"Diagnóstico determinístico:\n{_dump_json(decision.reasons)}\n"
             f"IntentPlan:\n{_dump_json(plan, indent=2)}\n"
             f"Catalog:\n{_dump_json(catalog, indent=2)}"
         )
-        decision = mat_check_llm.invoke([SystemMessage(content=context)])
-        if isinstance(decision, dict):
-            decision = MaterializationCheck.model_validate(decision)
-        elif not isinstance(decision, MaterializationCheck):
-            decision = MaterializationCheck(
-                ready=bool(getattr(decision, "ready", True)),
-                reason=str(getattr(decision, "reason", "")),
+        check = mat_check_llm.invoke([SystemMessage(content=context)])
+        if isinstance(check, dict):
+            check = MaterializationCheck.model_validate(check)
+        elif not isinstance(check, MaterializationCheck):
+            check = MaterializationCheck(
+                ready=bool(getattr(check, "ready", True)),
+                reason=str(getattr(check, "reason", "")),
             )
-        return {"mat_ready": decision.ready, "partial": False}
+        return {
+            "mat_ready": check.ready,
+            "partial": False,
+            "sufficiency_decision": decision,
+        }
 
     def generate_analytical_sql(state: GraphState) -> dict[str, Any]:
         plan = _coerce_intent_plan(state.get("intent_plan"))
@@ -929,29 +993,27 @@ def build_graph(
             f"IntentPlan:\n{_dump_json(plan, indent=2)}\n"
             f"Catalog:\n{_dump_json(catalog)}"
         )
-        last = state.get("last_result") or {}
-        if last.get("status") == "rejected":
-            context += f"\nErro anterior: {last.get('error')}"
+        last = _last_result(state)
+        if last is not None and last.status == "rejected":
+            context += f"\nErro anterior: {last.error}"
         sql_plan = sql_llm.invoke([SystemMessage(content=context)])
         if isinstance(sql_plan, dict):
             sql_plan = SQLPlan.model_validate(sql_plan)
-        return {"sql_plan": sql_plan.model_dump()}
+        return {"sql_plan": sql_plan}
 
-    def exec_duckdb(state: GraphState) -> dict[str, Any]:
-        sql_plan = SQLPlan.model_validate(state["sql_plan"])
+    def exec_duckdb(state: GraphState, config: RunnableConfig) -> dict[str, Any]:
+        sql_plan = _sql_plan(state)
+        if sql_plan is None:
+            return {
+                "last_result": ExecutionResult(status="error", error="sql_plan ausente"),
+            }
         budget = _budget(state)
         shard = _shard_routing(state)
-        session = state.get("duckdb_session")
-        if session is None:
-            return {
-                "last_result": ExecutionResult(
-                    status="error", error="Sessão DuckDB ausente"
-                ).model_dump(by_alias=True),
-            }
+        session = _ensure_duckdb_session(state, config)
 
         decision = check_sql_plan(
             sql_plan,
-            config=config,
+            config=agent_config,
             shard_routing=shard,
             path="analytical",
             context="query",
@@ -960,20 +1022,21 @@ def build_graph(
         )
         if decision.status == "rejected":
             return {
-                "last_result": result_from_rejection(decision.error or "rejeitado").model_dump(
-                    by_alias=True
-                )
+                "last_result": result_from_rejection(decision.error or "rejeitado"),
+                "duckdb_session": session,
             }
 
         try:
             rows = session.execute(decision.sql)
         except QueryTimeoutError as err:
-            return {"last_result": result_from_timeout(str(err)).model_dump(by_alias=True)}
+            return {
+                "last_result": result_from_timeout(str(err)),
+                "duckdb_session": session,
+            }
         except Exception as err:  # noqa: BLE001
             return {
-                "last_result": ExecutionResult(status="error", error=str(err)).model_dump(
-                    by_alias=True
-                ),
+                "last_result": ExecutionResult(status="error", error=str(err)),
+                "duckdb_session": session,
             }
 
         result = _compact_from_state(
@@ -986,25 +1049,26 @@ def build_graph(
         history = list(state.get("executed_sql_history") or [])
         history.append(decision.sql)
         return {
-            "last_result": result.model_dump(by_alias=True),
+            "last_result": result,
             "executed_sql_history": history,
+            "duckdb_session": session,
         }
 
     def verify(state: GraphState) -> dict[str, Any]:
         plan = _coerce_intent_plan(state.get("intent_plan"))
-        last = state.get("last_result") or {}
+        last = _last_result(state)
         context = (
             "Avalie last_result vs IntentPlan. Retorne VerifyDecision.\n"
             "Se last_result.status for rejected/error/timeout por SQL inválido "
             "(ex. nomes físicos de shard no DuckDB), prefira refine_sql.\n"
             f"IntentPlan:\n{_dump_json(plan)}\n"
-            f"last_result:\n{json.dumps(last, ensure_ascii=False, default=str)}"
+            f"last_result:\n{_dump_json(last)}"
         )
         decision = verify_llm.invoke([SystemMessage(content=context)])
         if isinstance(decision, dict):
             decision = VerifyDecision.model_validate(decision)
         budget = _budget(state)
-        last_status = last.get("status") or ""
+        last_status = last.status if last is not None else ""
         # Não “responder o erro” no path analítico se ainda há budget para corrigir SQL
         path = state.get("execution_path") or "simple"
         if (
@@ -1016,20 +1080,19 @@ def build_graph(
             decision = VerifyDecision(
                 action="refine_sql",
                 reason=(
-                    decision.reason
-                    or f"last_result.status={last_status}; tentando corrigir o SQL."
+                    decision.reason or f"last_result.status={last_status}; tentando corrigir o SQL."
                 ),
             )
         if decision.action == "refine_sql":
             budget = budget.model_copy(update={"refine_count": budget.refine_count + 1})
         return {
-            "verify_decision": decision.model_dump(),
-            "budget": budget.model_dump(),
+            "verify_decision": decision,
+            "budget": budget,
         }
 
     def answer(state: GraphState) -> dict[str, Any]:
         plan = _coerce_intent_plan(state.get("intent_plan"))
-        last = state.get("last_result") or {}
+        last = _last_result(state)
         sql_history = list(state.get("executed_sql_history") or [])
         partial = bool(state.get("partial", False))
         assumptions = list(plan.assumptions or [])
@@ -1041,7 +1104,7 @@ def build_graph(
             "- Parcial: sim/não\n"
             "- Status e avisos do last_result\n"
             f"IntentPlan:\n{_dump_json(plan)}\n"
-            f"last_result:\n{json.dumps(last, ensure_ascii=False, default=str)}\n"
+            f"last_result:\n{_dump_json(last)}\n"
             f"executed_sql_history:\n{json.dumps(sql_history, ensure_ascii=False)}\n"
             f"partial: {partial}\n"
         )
@@ -1098,8 +1161,8 @@ def build_graph(
         return "generate_analytical_sql" if state.get("mat_ready") else "plan_materialization"
 
     def route_after_verify(state: GraphState) -> str:
-        raw = state.get("verify_decision") or {}
-        action = raw.get("action", "answer")
+        decision = _verify_decision(state)
+        action = decision.action if decision is not None else "answer"
         budget = _budget(state)
         if action == "refine_sql" and budget.exhausted("refine_count"):
             return "answer"

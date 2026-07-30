@@ -11,7 +11,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
 
 import txt2sql.agent as agent_mod
@@ -282,5 +282,10 @@ def test_execute_queries_timeout_becomes_tool_message(monkeypatch: Any) -> None:
         config={"configurable": {"thread_id": "timeout-q"}},
     )
     # Dual-path: timeout vira last_result com status "timeout"
-    last_result = result.get("last_result") or {}
-    assert last_result.get("status") == "timeout", f"last_result={last_result}"
+    last_result = result.get("last_result")
+    status = (
+        last_result.status
+        if hasattr(last_result, "status")
+        else (last_result or {}).get("status")
+    )
+    assert status == "timeout", f"last_result={last_result}"

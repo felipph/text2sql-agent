@@ -320,6 +320,8 @@ class AgentConfig:
         max_shard_discriminators: Máximo de discriminadores por chamada
             ``materialize_sharded_table`` (fan-in multi-shard).
         query_timeout: Timeout default de execução SELECT (segundos); 0 desliga.
+        reuse_ttl_seconds: TTL de reuse do catálogo DuckDB (segundos).
+            Default 1800 (30 min). ``0`` ou negativo desabilita a verificação.
         llm: Configuração do provider LLM.
         override_connections: Overrides de connection string aplicados na carga.
     """
@@ -338,6 +340,7 @@ class AgentConfig:
     dialect: str | None = None
     max_shard_discriminators: int = 20
     query_timeout: int = 30
+    reuse_ttl_seconds: int = 1800
 
     llm: LLMConfig = field(default_factory=LLMConfig)
     override_connections: dict[str, str] = field(default_factory=dict)
@@ -538,6 +541,10 @@ def load_config(
     # agent params
     agent_raw: dict[str, Any] = raw.get("agent", {})
 
+    # analytics (TTL de reuse do catálogo DuckDB)
+    analytics_raw: dict[str, Any] = raw.get("analytics") or {}
+    reuse_ttl_seconds = int(analytics_raw.get("reuse_ttl_seconds", 1800))
+
     # llm params
     llm_raw: dict[str, Any] = raw.get("llm", {})
     llm = LLMConfig(
@@ -563,6 +570,7 @@ def load_config(
         dialect=raw.get("dialect"),
         max_shard_discriminators=int(agent_raw.get("max_shard_discriminators", 20)),
         query_timeout=int(agent_raw.get("query_timeout", 30)),
+        reuse_ttl_seconds=reuse_ttl_seconds,
         llm=llm,
         override_connections=override_connections or {},
     )

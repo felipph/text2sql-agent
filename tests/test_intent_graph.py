@@ -107,7 +107,7 @@ def test_ready_intent_reaches_generate_query(monkeypatch: Any) -> None:
         {"messages": [HumanMessage(content="nome?")]},
         config={"configurable": {"thread_id": "ready"}},
     )
-    assert result.get("intent_plan", {}).get("status") == "ready"
+    assert getattr(result.get("intent_plan"), "status", None) == "ready"
     assert "Alpha" in (result.get("final_answer") or "")
 
 
@@ -160,7 +160,11 @@ def test_clarification_interrupt_then_resume(monkeypatch: Any) -> None:
     )
     # Resume com resposta do usuário
     result2 = agent.invoke(Command(resume="mês atual"), config=cfg_run)
-    assert result2.get("final_answer") or result2.get("intent_plan", {}).get("status") in {
+    intent = result2.get("intent_plan")
+    intent_status = getattr(intent, "status", None) if intent is not None else None
+    if isinstance(intent, dict):
+        intent_status = intent.get("status")
+    assert result2.get("final_answer") or intent_status in {
         "ready",
         "needs_clarification",
         None,

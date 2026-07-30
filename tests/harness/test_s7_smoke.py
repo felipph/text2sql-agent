@@ -165,8 +165,13 @@ def _cfg_recebiveis_analytical() -> AgentConfig:
 
 def collect_s7_metrics(result: dict[str, Any]) -> dict[str, Any]:
     """Extrai métricas mínimas do estado final do grafo dual-path."""
-    last = result.get("last_result") or {}
-    status = last.get("status")
+    last = result.get("last_result")
+    if last is None:
+        status = None
+    elif hasattr(last, "status"):
+        status = last.status
+    else:
+        status = last.get("status")
     rejected = status == "rejected"
     success = status == "ok" and bool(result.get("final_answer"))
     return {
@@ -240,12 +245,14 @@ def test_s7_analytical_path_recebiveis_offline(monkeypatch: Any) -> None:
     )
     script = [
         ready,
-        GateDecision("refresh"),
         mat_plan,
         SQLPlan(sql="SELECT SUM(valor) AS total FROM recebiveis", dialect="duckdb"),
         VerifyDecision(action="answer", reason="ok"),
         "O total de recebíveis é R$ 175,00.",
     ]
+    monkeypatch.setattr(
+        "txt2sql.graph.build_deterministic_mat_plan", lambda *_a, **_k: None
+    )
     monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: ScriptedLLM(script))
     agent = build_agent(cfg, checkpointer=MemorySaver())
     result = agent.invoke(

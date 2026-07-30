@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rg -A 25 -n 'class (DuckDBCatalog|DuckDBTableInfo|ShardRouting|ShardBinding|Budget)' /home/felipph/pessoal/txt2sql/txt2s…)"
+    ]
+  }
+}

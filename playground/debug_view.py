@@ -93,11 +93,21 @@ def extract_state_debug(result: dict[str, Any]) -> TurnDebug:
     debug.sql_history = list(result.get("executed_sql_history") or [])
     debug.partial = bool(result.get("partial", False))
 
-    last = result.get("last_result") or {}
-    debug.last_result_status = str(last.get("status") or "")
+    last = result.get("last_result")
+    if last is None:
+        debug.last_result_status = ""
+    elif hasattr(last, "status"):
+        debug.last_result_status = str(last.status or "")
+    else:
+        debug.last_result_status = str(last.get("status") or "")
 
-    intent = result.get("intent_plan") or {}
-    debug.assumptions = list(intent.get("assumptions") or [])
+    intent = result.get("intent_plan")
+    if intent is None:
+        debug.assumptions = []
+    elif hasattr(intent, "assumptions"):
+        debug.assumptions = list(intent.assumptions or [])
+    else:
+        debug.assumptions = list(intent.get("assumptions") or [])
 
     for i, sql in enumerate(debug.sql_history, start=1):
         debug.steps.append(
@@ -109,11 +119,16 @@ def extract_state_debug(result: dict[str, Any]) -> TurnDebug:
         )
 
     if debug.last_result_status:
+        last_payload = (
+            last.model_dump(by_alias=True)
+            if hasattr(last, "model_dump")
+            else last
+        )
         debug.steps.append(
             DebugStep(
                 name="last_result",
                 args={"status": debug.last_result_status},
-                result=json.dumps(last, ensure_ascii=False, default=str),
+                result=json.dumps(last_payload, ensure_ascii=False, default=str),
             )
         )
 

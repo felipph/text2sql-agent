@@ -137,6 +137,7 @@ class DuckDBSession:
 
         total_rows = 0
         with source_engine.connect() as conn:
+            logger.debug(f"Query No banco de origem: {select_sql}")
             result = conn.execute(text(select_sql))
             columns = list(result.keys())
             first_batch = [tuple(r) for r in result.fetchmany(BATCH_SIZE)]

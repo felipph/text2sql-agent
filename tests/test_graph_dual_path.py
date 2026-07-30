@@ -10,11 +10,16 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import Command
 
 from txt2sql.agent import build_agent
 from txt2sql.artifacts import (
+    Budget,
+    DuckDBCatalog,
+    ExecutionResult,
     MaterializationPlan,
     MaterializationStep,
+    ShardRouting,
     SQLPlan,
     VerifyDecision,
 )
@@ -26,8 +31,24 @@ from txt2sql.config import (
     ShardingConfig,
     TableConfig,
 )
-from txt2sql.graph import MaterializationCheck
-from txt2sql.intent import FilterClause, IntentPlan, JoinClause, JoinOn, MetricClause, EntityRef
+from txt2sql.intent import (
+    Clarification,
+    EntityRef,
+    FilterClause,
+    IntentPlan,
+    JoinClause,
+    JoinOn,
+    MetricClause,
+)
+
+
+def _d(obj: Any) -> dict[str, Any]:
+    """Normaliza artefato tipado ou dict (checkpoint) para asserts legados."""
+    if obj is None:
+        return {}
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump(by_alias=True)
+    return dict(obj)
 
 
 class GateDecision:
@@ -41,6 +62,7 @@ class ScriptedLLM:
     def __init__(self, script: list[Any]) -> None:
         self._script = script
         self._i = 0
+        self.invoke_count = 0
 
     def bind_tools(self, tools: list[Any]) -> ScriptedLLM:
         return self
@@ -49,6 +71,7 @@ class ScriptedLLM:
         return self
 
     def invoke(self, messages: list[Any]) -> Any:
+        self.invoke_count += 1
         msg = self._script[min(self._i, len(self._script) - 1)]
         self._i += 1
         return msg
@@ -149,6 +172,34 @@ def _cfg_sharded_no_disc() -> AgentConfig:
     )
 
 
+def test_graph_state_artifacts_are_typed_instances(monkeypatch: Any) -> None:
+    """Após invoke, artefatos do GraphState são instâncias Pydantic (não dict)."""
+    _env()
+    cfg = _cfg_clientes_db()
+    ready = IntentPlan(
+        status="ready",
+        question_rewrite="nome do cliente 111",
+        metrics=[MetricClause(table_id="clientes", column_id="razao_social", agg="none")],
+    )
+    script = [
+        ready,
+        SQLPlan(sql="SELECT razao_social FROM clientes WHERE cnpj = '111'", dialect="postgres"),
+        VerifyDecision(action="answer", reason="ok"),
+        "O cliente 111 é Alpha.",
+    ]
+    monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: ScriptedLLM(script))
+    agent = build_agent(cfg, checkpointer=None)
+    result = agent.invoke({"messages": [HumanMessage(content="nome do cliente 111?")]})
+
+    assert isinstance(result["budget"], Budget)
+    assert isinstance(result["duckdb_catalog"], DuckDBCatalog)
+    assert isinstance(result["intent_plan"], IntentPlan)
+    assert isinstance(result["sql_plan"], SQLPlan)
+    assert isinstance(result["shard_routing"], ShardRouting)
+    assert isinstance(result["last_result"], ExecutionResult)
+    assert isinstance(result["verify_decision"], VerifyDecision)
+
+
 def test_simple_path_clientes_final_answer(monkeypatch: Any) -> None:
     _env()
     cfg = _cfg_clientes_db()
@@ -168,7 +219,7 @@ def test_simple_path_clientes_final_answer(monkeypatch: Any) -> None:
     result = agent.invoke({"messages": [HumanMessage(content="nome do cliente 111?")]})
 
     assert result.get("execution_path") == "simple"
-    last = result.get("last_result") or {}
+    last = _d(result.get("last_result"))
     assert last.get("status") == "ok"
     assert any(r.get("razao_social") == "Alpha" for r in last.get("sample", []))
     assert result.get("final_answer")
@@ -203,13 +254,16 @@ def test_analytical_path_force_analytical_reaches_answer(monkeypatch: Any) -> No
     )
     script = [
         ready,
-        GateDecision("refresh"),
         mat_plan,
         SQLPlan(sql="SELECT SUM(valor) AS total FROM recebiveis", dialect="duckdb"),
         VerifyDecision(action="answer", reason="ok"),
         "O total de recebíveis é R$ 175,00.",
     ]
+    # Só recebíveis shardados → plano determinístico; mat_plan abaixo é legado/ignorado
+    # se o gate já montar o plano. Preferimos script sem GateDecision.
     monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: ScriptedLLM(script))
+    # Força path LLM de materialização para manter o extract tipado do script
+    monkeypatch.setattr("txt2sql.graph.build_deterministic_mat_plan", lambda *_a, **_k: None)
     agent = build_agent(cfg, checkpointer=MemorySaver())
     assert "check_materialization" in agent.get_graph().nodes
     result = agent.invoke(
@@ -218,7 +272,7 @@ def test_analytical_path_force_analytical_reaches_answer(monkeypatch: Any) -> No
     )
 
     assert result.get("execution_path") == "analytical"
-    last = result.get("last_result") or {}
+    last = _d(result.get("last_result"))
     assert last.get("status") == "ok"
     totals = [r.get("total") for r in last.get("sample", [])]
     assert any(t == 175.0 for t in totals)
@@ -244,7 +298,7 @@ def test_simple_path_rejected_sql_reaches_answer(monkeypatch: Any) -> None:
     agent = build_agent(cfg, checkpointer=None)
     result = agent.invoke({"messages": [HumanMessage(content="apague todos os clientes")]})
 
-    last = result.get("last_result") or {}
+    last = _d(result.get("last_result"))
     assert last.get("status") == "rejected"
     assert last.get("error")
     assert result.get("verify_decision")
@@ -285,7 +339,7 @@ def test_missing_discriminator_preserves_intent_fields(monkeypatch: Any) -> None
     agent = build_agent(cfg, checkpointer=None)
     result = agent.invoke({"messages": [HumanMessage(content="soma dos recebíveis?")]})
 
-    plan = result.get("intent_plan") or {}
+    plan = _d(result.get("intent_plan"))
     assert plan.get("status") == "needs_clarification"
     assert plan.get("metrics"), "metrics do intent não podem ser apagados na clarificação"
     assert plan["metrics"][0]["table_id"] == "recebiveis"
@@ -411,9 +465,7 @@ def test_check_materialization_retries_plan(monkeypatch: Any) -> None:
     )
     script = [
         ready,
-        GateDecision("refresh"),
         mat_plan_1,
-        MaterializationCheck(ready=False, reason="falta clientes"),
         mat_plan_2,
         SQLPlan(sql="SELECT SUM(r.valor) AS total FROM recebiveis r", dialect="duckdb"),
         VerifyDecision(action="answer", reason="ok"),
@@ -426,7 +478,7 @@ def test_check_materialization_retries_plan(monkeypatch: Any) -> None:
         config={"configurable": {"thread_id": "mat-retry"}},
     )
 
-    budget = result.get("budget") or {}
+    budget = _d(result.get("budget"))
     assert budget.get("mat_loop_count", 0) >= 2
     assert result.get("execution_path") == "analytical"
     assert result.get("final_answer")
@@ -461,17 +513,16 @@ def test_catalog_preserved_across_turns(monkeypatch: Any) -> None:
     )
     script = [
         ready,
-        GateDecision("refresh"),
         mat_plan,
         SQLPlan(sql="SELECT SUM(valor) AS total FROM recebiveis", dialect="duckdb"),
         VerifyDecision(action="answer", reason="ok"),
         "175.",
         ready,
-        GateDecision("reuse"),
         SQLPlan(sql="SELECT SUM(valor) AS total FROM recebiveis", dialect="duckdb"),
         VerifyDecision(action="answer", reason="ok"),
         "175 again.",
     ]
+    monkeypatch.setattr("txt2sql.graph.build_deterministic_mat_plan", lambda *_a, **_k: None)
     monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: ScriptedLLM(script))
     agent = build_agent(cfg, checkpointer=MemorySaver())
     thread_cfg = {"configurable": {"thread_id": "catalog-reuse"}}
@@ -479,14 +530,14 @@ def test_catalog_preserved_across_turns(monkeypatch: Any) -> None:
         {"messages": [HumanMessage(content="total?")]},
         config=thread_cfg,
     )
-    catalog_after = (r1.get("duckdb_catalog") or {}).get("tables") or []
+    catalog_after = _d(r1.get("duckdb_catalog")).get("tables") or []
     assert len(catalog_after) >= 1
 
     r2 = agent.invoke(
         {"messages": [HumanMessage(content="total de novo?")]},
         config=thread_cfg,
     )
-    catalog_turn2_init = (r2.get("duckdb_catalog") or {}).get("tables") or []
+    catalog_turn2_init = _d(r2.get("duckdb_catalog")).get("tables") or []
     assert len(catalog_turn2_init) >= 1
     assert r2.get("gate_action") == "reuse" or r2.get("final_answer")
 
@@ -549,12 +600,12 @@ def test_analytical_invented_target_table_still_materializes(monkeypatch: Any) -
     )
     script = [
         ready,
-        GateDecision("refresh"),
         mat_plan,
         SQLPlan(sql="SELECT SUM(valor) AS total FROM recebiveis", dialect="duckdb"),
         VerifyDecision(action="answer", reason="ok"),
         "Total 175.",
     ]
+    monkeypatch.setattr("txt2sql.graph.build_deterministic_mat_plan", lambda *_a, **_k: None)
     monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: ScriptedLLM(script))
     agent = build_agent(cfg, checkpointer=MemorySaver())
     result = agent.invoke(
@@ -562,9 +613,9 @@ def test_analytical_invented_target_table_still_materializes(monkeypatch: Any) -
         config={"configurable": {"thread_id": "invented-target"}},
     )
     assert result.get("execution_path") == "analytical"
-    last = result.get("last_result") or {}
+    last = _d(result.get("last_result"))
     assert last.get("status") == "ok"
-    catalog = (result.get("duckdb_catalog") or {}).get("tables") or []
+    catalog = _d(result.get("duckdb_catalog")).get("tables") or []
     assert any(t.get("name") == "recebiveis" for t in catalog)
     assert "175" in (result.get("final_answer") or "")
 
@@ -619,9 +670,7 @@ def _cfg_multi_shard_and_clientes() -> AgentConfig:
                     resolver="playground.shard_resolver:resolve_cnpj_shard",
                 ),
                 columns=[ColumnConfig(name="cnpj"), ColumnConfig(name="valor")],
-                duckdb=DuckDBConfig(
-                    enabled=True, force_analytical=True, fetch_limit=1000
-                ),
+                duckdb=DuckDBConfig(enabled=True, force_analytical=True, fetch_limit=1000),
             ),
         ],
         dialect=None,
@@ -636,9 +685,7 @@ def test_analytical_multi_shard_fan_in_sums_all_cnpjs(monkeypatch: Any) -> None:
     ready = IntentPlan(
         status="ready",
         question_rewrite="soma total dos dois CNPJs",
-        filters=[
-            FilterClause(table_id="recebiveis", column_id="cnpj", op="in", value=cnpjs)
-        ],
+        filters=[FilterClause(table_id="recebiveis", column_id="cnpj", op="in", value=cnpjs)],
         metrics=[MetricClause(table_id="recebiveis", column_id="valor", agg="sum")],
     )
     # Plano típico do LLM: um passo sem shard_bindings — o nó deve fan-in mesmo assim
@@ -653,7 +700,6 @@ def test_analytical_multi_shard_fan_in_sums_all_cnpjs(monkeypatch: Any) -> None:
     )
     script = [
         ready,
-        GateDecision("refresh"),
         mat_plan,
         SQLPlan(
             sql=(
@@ -665,6 +711,7 @@ def test_analytical_multi_shard_fan_in_sums_all_cnpjs(monkeypatch: Any) -> None:
         VerifyDecision(action="answer", reason="ok"),
         "Total 4121.55",
     ]
+    monkeypatch.setattr("txt2sql.graph.build_deterministic_mat_plan", lambda *_a, **_k: None)
     monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: ScriptedLLM(script))
     agent = build_agent(cfg, checkpointer=MemorySaver())
     result = agent.invoke(
@@ -672,9 +719,9 @@ def test_analytical_multi_shard_fan_in_sums_all_cnpjs(monkeypatch: Any) -> None:
         config={"configurable": {"thread_id": "multi-fan-in"}},
     )
     assert result.get("execution_path") == "analytical"
-    routing = result.get("shard_routing") or {}
+    routing = _d(result.get("shard_routing"))
     assert routing.get("mode") == "multi"
-    last = result.get("last_result") or {}
+    last = _d(result.get("last_result"))
     assert last.get("status") == "ok"
     sample = last.get("sample") or []
     assert sample, last
@@ -689,18 +736,16 @@ def test_analytical_join_clientes_materialized_in_duckdb(monkeypatch: Any) -> No
     ready = IntentPlan(
         status="ready",
         question_rewrite="tabela cnpj nome valor",
-        filters=[
-            FilterClause(table_id="recebiveis", column_id="cnpj", op="in", value=cnpjs)
+        filters=[FilterClause(table_id="recebiveis", column_id="cnpj", op="in", value=cnpjs)],
+        metrics=[MetricClause(table_id="recebiveis", column_id="valor", agg="sum")],
+        joins=[
+            JoinClause(
+                from_table_id="recebiveis",
+                to_table_id="clientes",
+                on=[JoinOn(from_column="cnpj", to_column="cnpj")],
+            )
         ],
-            metrics=[MetricClause(table_id="recebiveis", column_id="valor", agg="sum")],
-            joins=[
-                JoinClause(
-                    from_table_id="recebiveis",
-                    to_table_id="clientes",
-                    on=[JoinOn(from_column="cnpj", to_column="cnpj")],
-                )
-            ],
-        )
+    )
     # LLM planejou as duas tabelas; fan-in de recebiveis ainda deve ser completo
     mat_plan = MaterializationPlan(
         steps=[
@@ -727,7 +772,6 @@ def test_analytical_join_clientes_materialized_in_duckdb(monkeypatch: Any) -> No
     )
     script = [
         ready,
-        GateDecision("refresh"),
         mat_plan,
         SQLPlan(sql=join_sql, dialect="duckdb", expected_shape="table"),
         VerifyDecision(action="answer", reason="ok"),
@@ -740,9 +784,9 @@ def test_analytical_join_clientes_materialized_in_duckdb(monkeypatch: Any) -> No
         config={"configurable": {"thread_id": "multi-join"}},
     )
     assert result.get("execution_path") == "analytical"
-    last = result.get("last_result") or {}
+    last = _d(result.get("last_result"))
     assert last.get("status") == "ok", last
-    catalog = (result.get("duckdb_catalog") or {}).get("tables") or []
+    catalog = _d(result.get("duckdb_catalog")).get("tables") or []
     names = {t.get("name") for t in catalog}
     assert "recebiveis" in names
     assert "clientes" in names
@@ -763,9 +807,7 @@ def test_analytical_ensures_intent_table_omitted_from_mat_plan(monkeypatch: Any)
     ready = IntentPlan(
         status="ready",
         question_rewrite="tabela com nome",
-        filters=[
-            FilterClause(table_id="recebiveis", column_id="cnpj", op="in", value=cnpjs)
-        ],
+        filters=[FilterClause(table_id="recebiveis", column_id="cnpj", op="in", value=cnpjs)],
         metrics=[MetricClause(table_id="recebiveis", column_id="valor", agg="sum")],
         joins=[
             JoinClause(
@@ -791,7 +833,6 @@ def test_analytical_ensures_intent_table_omitted_from_mat_plan(monkeypatch: Any)
     )
     script = [
         ready,
-        GateDecision("refresh"),
         mat_plan,
         SQLPlan(sql=join_sql, dialect="duckdb", expected_shape="table"),
         VerifyDecision(action="answer", reason="ok"),
@@ -803,11 +844,11 @@ def test_analytical_ensures_intent_table_omitted_from_mat_plan(monkeypatch: Any)
         {"messages": [HumanMessage(content="tabela?")]},
         config={"configurable": {"thread_id": "ensure-clientes"}},
     )
-    catalog = (result.get("duckdb_catalog") or {}).get("tables") or []
+    catalog = _d(result.get("duckdb_catalog")).get("tables") or []
     names = {t.get("name") for t in catalog}
     assert "clientes" in names
     assert "recebiveis" in names
-    last = result.get("last_result") or {}
+    last = _d(result.get("last_result"))
     assert last.get("status") == "ok", last
     assert len(last.get("sample") or []) == 2
 
@@ -820,9 +861,7 @@ def test_analytical_refines_after_physical_shard_sql(monkeypatch: Any) -> None:
     ready = IntentPlan(
         status="ready",
         question_rewrite="tabela cnpj nome valor",
-        filters=[
-            FilterClause(table_id="recebiveis", column_id="cnpj", op="in", value=cnpjs)
-        ],
+        filters=[FilterClause(table_id="recebiveis", column_id="cnpj", op="in", value=cnpjs)],
         metrics=[MetricClause(table_id="recebiveis", column_id="valor", agg="sum")],
         joins=[
             JoinClause(
@@ -858,7 +897,6 @@ def test_analytical_refines_after_physical_shard_sql(monkeypatch: Any) -> None:
     )
     script = [
         ready,
-        GateDecision("refresh"),
         mat_plan,
         SQLPlan(sql=bad_sql, dialect="duckdb", expected_shape="table"),
         # verify diria answer, mas o nó deve forçar refine_sql
@@ -873,10 +911,207 @@ def test_analytical_refines_after_physical_shard_sql(monkeypatch: Any) -> None:
         {"messages": [HumanMessage(content="tabela?")]},
         config={"configurable": {"thread_id": "refine-physical"}},
     )
-    last = result.get("last_result") or {}
+    last = _d(result.get("last_result"))
     assert last.get("status") == "ok", last
     sample = last.get("sample") or []
     assert len(sample) == 2
     by_cnpj = {row["cnpj"]: row for row in sample}
     assert abs(float(by_cnpj["65410433218196"]["valor"]) - 1789.28) < 0.01
     assert by_cnpj["74778161849593"]["nome"] == "Cliente_001"
+
+
+def test_sufficiency_gate_skips_llm_when_deterministic(monkeypatch: Any) -> None:
+    """Catálogo vazio → refresh determinístico; GateDecision não é consumido."""
+    _env()
+    cfg = _cfg_recebiveis_analytical()
+    cfg.reuse_ttl_seconds = 0
+    ready = IntentPlan(
+        status="ready",
+        question_rewrite="total",
+        filters=[
+            FilterClause(
+                table_id="recebiveis",
+                column_id="cnpj",
+                op="eq",
+                value="12345678000190",
+            )
+        ],
+        metrics=[MetricClause(table_id="recebiveis", column_id="valor", agg="sum")],
+    )
+    script = [
+        ready,
+        SQLPlan(sql="SELECT SUM(valor) AS total FROM recebiveis", dialect="duckdb"),
+        VerifyDecision(action="answer", reason="ok"),
+        "175",
+    ]
+    llm = ScriptedLLM(script)
+    monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: llm)
+    agent = build_agent(cfg, checkpointer=MemorySaver())
+    result = agent.invoke(
+        {"messages": [HumanMessage(content="total?")]},
+        config={"configurable": {"thread_id": "det-gate"}},
+    )
+    assert result.get("gate_action") == "refresh"
+    decision = result.get("sufficiency_decision")
+    assert decision is not None
+    assert getattr(decision, "action", None) == "reuse" or _d(decision).get("action") in {
+        "reuse",
+        "refresh",
+    }
+    # interpret + sql + verify + answer = 4; sem GateDecision/MaterializationPlan
+    assert llm.invoke_count == 4
+    assert result.get("final_answer")
+    assert "175" in result["final_answer"]
+
+
+def test_sufficiency_gate_llm_fallback_on_unknown(monkeypatch: Any) -> None:
+    """unknown determinístico aciona gate_llm (GateDecision da fila)."""
+    from txt2sql.sufficiency import SufficiencyDecision
+
+    _env()
+    cfg = _cfg_recebiveis_analytical()
+    ready = IntentPlan(
+        status="ready",
+        question_rewrite="total",
+        filters=[
+            FilterClause(
+                table_id="recebiveis",
+                column_id="cnpj",
+                op="eq",
+                value="12345678000190",
+            )
+        ],
+        metrics=[MetricClause(table_id="recebiveis", column_id="valor", agg="sum")],
+    )
+    mat_plan = MaterializationPlan(
+        steps=[
+            MaterializationStep(
+                source_query="SELECT cnpj, valor, status FROM recebiveis_123",
+                target_table="recebiveis",
+                mode="replace",
+            )
+        ],
+    )
+    script = [
+        ready,
+        GateDecision("refresh"),
+        mat_plan,
+        SQLPlan(sql="SELECT SUM(valor) AS total FROM recebiveis", dialect="duckdb"),
+        VerifyDecision(action="answer", reason="ok"),
+        "175",
+    ]
+    llm = ScriptedLLM(script)
+    calls = {"n": 0}
+
+    def _fake_eval(*_a: Any, **_k: Any) -> SufficiencyDecision:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return SufficiencyDecision(action="unknown", reasons=["predicado OR"])
+        return SufficiencyDecision(action="reuse")
+
+    monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: llm)
+    monkeypatch.setattr("txt2sql.graph.evaluate_sufficiency", _fake_eval)
+    monkeypatch.setattr("txt2sql.graph.build_deterministic_mat_plan", lambda *_a, **_k: None)
+    agent = build_agent(cfg, checkpointer=MemorySaver())
+    result = agent.invoke(
+        {"messages": [HumanMessage(content="total?")]},
+        config={"configurable": {"thread_id": "unknown-gate"}},
+    )
+    assert result.get("gate_action") == "refresh"
+    assert result.get("final_answer")
+    # interpret + gate + mat + sql + verify + answer
+    assert llm.invoke_count >= 5
+    assert calls["n"] >= 2
+
+
+def _interrupt_question(result: dict[str, Any]) -> str | None:
+    for item in result.get("__interrupt__") or []:
+        value = getattr(item, "value", None) or item
+        if isinstance(value, dict) and value.get("type") == "clarification":
+            return str(value.get("question") or "")
+    return None
+
+
+def test_resume_after_clarification_rehydrates_duckdb_on_reuse(
+    monkeypatch: Any,
+) -> None:
+    """HITL resume não passa por init_state; reuse não deve falhar com sessão ausente."""
+    _env()
+    cfg = _cfg_recebiveis_analytical()
+    cfg.reuse_ttl_seconds = 0
+    ready = IntentPlan(
+        status="ready",
+        question_rewrite="total recebíveis",
+        filters=[
+            FilterClause(
+                table_id="recebiveis",
+                column_id="cnpj",
+                op="eq",
+                value="12345678000190",
+            )
+        ],
+        metrics=[MetricClause(table_id="recebiveis", column_id="valor", agg="sum")],
+    )
+    clarify = IntentPlan(
+        status="needs_clarification",
+        question_rewrite="adicionar colunas",
+        clarification=Clarification(question="Confirma adicionar total pago e vencido?"),
+    )
+    mat_plan = MaterializationPlan(
+        steps=[
+            MaterializationStep(
+                source_query="SELECT cnpj, valor, status FROM recebiveis_123",
+                target_table="recebiveis",
+                mode="replace",
+            )
+        ],
+    )
+    sql = SQLPlan(sql="SELECT SUM(valor) AS total FROM recebiveis", dialect="duckdb")
+    vd = VerifyDecision(action="answer", reason="ok")
+
+    class _LLM(ScriptedLLM):
+        def invoke(self, messages: list[Any]) -> Any:
+            first = messages[0] if messages else None
+            content = getattr(first, "content", "") or ""
+            if isinstance(content, str) and "Responda ao usuário" in content:
+                return "ok"
+            return super().invoke(messages)
+
+    # Pad de refine (verify força refine_sql quando last_result=error)
+    script = [
+        ready,
+        mat_plan,
+        sql,
+        vd,
+        clarify,
+        ready,
+        sql,
+        vd,
+        sql,
+        vd,
+        sql,
+        vd,
+    ]
+    monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: _LLM(script))
+    monkeypatch.setattr("txt2sql.graph.build_deterministic_mat_plan", lambda *_a, **_k: None)
+    agent = build_agent(cfg, checkpointer=MemorySaver())
+    thread = {"configurable": {"thread_id": "resume-duckdb-session"}}
+
+    r1 = agent.invoke(
+        {"messages": [HumanMessage(content="total?")]},
+        config=thread,
+    )
+    assert _d(r1.get("last_result")).get("status") == "ok"
+
+    r2 = agent.invoke(
+        {"messages": [HumanMessage(content="adicione total pago e vencido")]},
+        config=thread,
+    )
+    assert _interrupt_question(r2)
+
+    r3 = agent.invoke(Command(resume="Sim"), config=thread)
+    last = _d(r3.get("last_result"))
+    assert last.get("error") != "Sessão DuckDB ausente", last
+    assert last.get("status") == "ok", last
+    assert r3.get("gate_action") == "reuse"
+    assert r3.get("duckdb_session") is not None
