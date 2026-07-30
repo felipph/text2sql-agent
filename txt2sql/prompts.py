@@ -48,6 +48,37 @@ class Txt2SqlPromptBuilder:
 
     def build_intent_prompt(self, schema_loader: SchemaLoader | None = None) -> str:
         """System prompt do nó ``interpret_intent`` (sem regras de SQL/tools)."""
+        rules = [
+            "## Regras do IntentPlan",
+            "- status=ready somente quando tabelas, filtros e métricas estiverem claros.",
+            "- status=needs_clarification quando faltar informação crítica.",
+            "- Reutilize fatos já ditos no histórico da conversa; não peça de novo "
+            "um valor que o usuário já informou.",
+            "- entities: faça grounding das menções do usuário (role table|column|value).",
+            "- filters/metrics/joins/group_by/order_by: use só table_id/column_id válidos.",
+            "- question_rewrite: reformule a pergunta desambiguada em PT-BR.",
+        ]
+        sharded = self._config.sharded_tables
+        if sharded:
+            disc_lines = ", ".join(
+                f"`{t.id}`→`{t.sharding.discriminator_column}`"
+                for t in sharded
+                if t.sharding is not None
+            )
+            rules.extend(
+                [
+                    "",
+                    "### Tabelas shardadas (discriminador OBRIGATÓRIO em filters)",
+                    f"Tabelas shardadas e discriminadores: {disc_lines}.",
+                    "- Se a pergunta (ou o histórico) JÁ traz o valor do discriminador "
+                    "(ex.: CNPJ), use status=ready E inclua FilterClause em ``filters`` "
+                    "com esse valor (op=eq para um valor, op=in para vários).",
+                    "- NUNCA deixe o discriminador só no question_rewrite — sem "
+                    "``filters`` o roteamento pede o valor de novo ao usuário.",
+                    "- Só use needs_clarification pedindo o discriminador quando ele "
+                    "realmente NÃO aparece na pergunta nem no histórico.",
+                ]
+            )
         sections = [
             (
                 "## Persona\n"
@@ -63,16 +94,7 @@ class Txt2SqlPromptBuilder:
             self._section_relationships(),
             self._section_table_semantics(),
             self._section_column_semantics(schema_loader),
-            (
-                "## Regras do IntentPlan\n"
-                "- status=ready somente quando tabelas, filtros e métricas estiverem claros.\n"
-                "- status=needs_clarification quando faltar informação crítica.\n"
-                "- Reutilize fatos já ditos no histórico da conversa; não peça de novo "
-                "um valor que o usuário já informou.\n"
-                "- entities: faça grounding das menções do usuário (role table|column|value).\n"
-                "- filters/metrics/joins/group_by/order_by: use só table_id/column_id válidos.\n"
-                "- question_rewrite: reformule a pergunta desambiguada em PT-BR."
-            ),
+            "\n".join(rules),
         ]
         return "\n\n".join(s for s in sections if s)
 
@@ -162,85 +184,31 @@ class Txt2SqlPromptBuilder:
                 f"bancos): {names}."
             ),
             "",
-            "Protocolo OBRIGATÓRIO para tabelas shardadas:",
+            "O roteamento de shard é feito automaticamente pelo sistema — você NÃO precisa "
+            "chamar nenhuma ferramenta de shard. Sua responsabilidade:",
             (
-                "1. Antes de consultar uma tabela shardada, você DEVE chamar a ferramenta "
-                "`resolve_shard(table_id, discriminator_value)` passando o valor do "
-                "discriminador extraído da pergunta do usuário."
+                "1. Inclua o valor do discriminador nos filtros do IntentPlan. Se a pergunta "
+                "NÃO traz o discriminador, indique `status=needs_clarification` e peça o "
+                "valor — NUNCA assuma ou invente."
             ),
             (
-                "2. A ferramenta retorna `{database_id, table_name}` — use o `table_name` "
-                "retornado (nome físico real) na sua query."
-            ),
-            "3. NUNCA assuma ou invente o shard/nome físico da tabela.",
-            (
-                "4. É TERMINANTEMENTE PROIBIDO fazer fan-out cego (consultar todos os "
-                "shards sem lista de discriminadores). Se o usuário NÃO forneceu nem "
-                "permitiu descobrir o valor do discriminador, você DEVE PARAR e PEDIR "
-                "antes de continuar."
+                "2. É TERMINANTEMENTE PROIBIDO fan-out cego (consultar todos os shards "
+                "sem discriminador explícito)."
             ),
             (
-                "5. Se a pergunta envolve 2 ou mais valores do discriminador (explícitos "
-                "na pergunta ou descobertos via query em tabela NÃO shardada):"
-            ),
-            "   a. Obtenha a lista completa de valores.",
-            (
-                "   b. Chame `materialize_sharded_table(table_id, discriminator_values)` "
-                "UMA vez (nunca com 0 ou 1 valor)."
+                "3. Quando a pergunta envolver 2+ discriminadores, o sistema fará fan-in "
+                "automático no DuckDB e você receberá o resultado pelo nome lógico da "
+                "tabela (ex.: `recebiveis`). Analise pelo nome lógico."
             ),
             (
-                "   c. Em seguida consulte com `sql_db_query` usando o NOME LÓGICO da "
-                "tabela (ex.: `recebiveis`), NÃO os nomes físicos."
+                "4. NUNCA faça JOIN misturando tabela não-shardada e shardada na mesma "
+                "query SQL — bancos diferentes. Correlacione em passos e combine na "
+                "resposta final."
             ),
             (
-                "   d. Se o retorno indicar `truncated=true`, avise o usuário na resposta "
-                "final (análise parcial pelo limite configurado)."
-            ),
-            (
-                "6. Com exatamente 1 discriminador, use o protocolo single "
-                "(`resolve_shard` + query no nome físico) — não chame "
-                "`materialize_sharded_table`."
-            ),
-            (
-                "7. NUNCA faça JOIN (nem FROM com várias tabelas) misturando tabela "
-                "não-shardada e tabela shardada na mesma query SQL — bancos "
-                "diferentes. Correlacione em passos e combine na resposta final."
-            ),
-            "",
-            (
-                'Receita quando a pergunta NÃO traz o discriminador '
-                '(ex.: "clientes com recebível vencido"):'
-            ),
-            (
-                "A. `sql_db_query` na tabela NÃO shardada para listar os discriminadores "
-                "(ex.: `SELECT cnpj FROM clientes`)."
-            ),
-            (
-                "B. Com a lista: se 2+ valores → `materialize_sharded_table`; se 1 → "
-                "`resolve_shard`."
-            ),
-            (
-                "C. Só então `sql_db_query` na shardada (nome lógico após materialize, "
-                "ou nome físico após resolve) filtrando o critério (ex.: status)."
-            ),
-            (
-                "D. Se precisar da razão social, nova query só em `clientes` com os "
-                "CNPJs encontrados — NUNCA JOIN cross-database."
-            ),
-            (
-                "E. Se o roteador/guardrail rejeitar uma query, NÃO desista com dado "
-                "parcial irrelevante: corrija seguindo A–D e responda com a evidência "
-                "completa."
-            ),
-            (
-                "F. Você pode emitir várias `sql_db_query` no mesmo passo (ex.: filtrar "
-                "recebíveis e buscar razão social); elas rodam em sequência."
-            ),
-            (
-                "G. Se `materialize_sharded_table` (ou resolve_shard) retornar ERRO, "
-                "NÃO invente resposta parcial com resolve_shard de um subconjunto "
-                "nem consulte um único físico com IN de vários CNPJs. Explique a "
-                "falha ao usuário ou corrija os discriminadores/seed e tente de novo."
+                "5. Se o discriminador não consta na pergunta mas pode ser descoberto via "
+                "query em outra tabela (ex.: `SELECT cnpj FROM clientes`), inclua essa "
+                "dependência no IntentPlan antes de consultar a tabela shardada."
             ),
             "",
             "Discriminadores por tabela:",

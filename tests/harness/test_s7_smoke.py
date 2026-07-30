@@ -200,7 +200,7 @@ def test_s7_simple_path_clientes_offline(monkeypatch: Any) -> None:
         "A razão social do cliente 111 é Alpha.",
     ]
     monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: ScriptedLLM(script))
-    agent = build_agent(cfg, checkpointer=None, dual_path=True)
+    agent = build_agent(cfg, checkpointer=None)
     result = agent.invoke({"messages": [HumanMessage(content=q.prompt)]})
     metrics = collect_s7_metrics(result)
 
@@ -247,7 +247,7 @@ def test_s7_analytical_path_recebiveis_offline(monkeypatch: Any) -> None:
         "O total de recebíveis é R$ 175,00.",
     ]
     monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: ScriptedLLM(script))
-    agent = build_agent(cfg, checkpointer=MemorySaver(), dual_path=True)
+    agent = build_agent(cfg, checkpointer=MemorySaver())
     result = agent.invoke(
         {"messages": [HumanMessage(content=q.prompt)]},
         config={"configurable": {"thread_id": "s7-analytical"}},
@@ -277,7 +277,7 @@ def test_s7_rejected_sql_offline(monkeypatch: Any) -> None:
         "Não foi possível executar a operação solicitada.",
     ]
     monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: ScriptedLLM(script))
-    agent = build_agent(cfg, checkpointer=None, dual_path=True)
+    agent = build_agent(cfg, checkpointer=None)
     result = agent.invoke({"messages": [HumanMessage(content=q.prompt)]})
     metrics = collect_s7_metrics(result)
 

@@ -41,7 +41,7 @@ from txt2sql.artifacts import (
 )
 from txt2sql.config import AgentConfig, TableConfig
 from txt2sql.db.duckdb_layer import DuckDBSession
-from txt2sql.db.multi_shard import build_in_filter
+from txt2sql.db.fan_in import build_in_filter, fan_in
 from txt2sql.db.registry import DatabaseRegistry, QueryTimeoutError
 from txt2sql.db.schema import SchemaLoader
 from txt2sql.db.session_store import DuckDBSessionStore
@@ -52,7 +52,11 @@ from txt2sql.path_routing import route_execution
 from txt2sql.policy import check_sql_plan
 from txt2sql.prompts import Txt2SqlPromptBuilder
 from txt2sql.query_routing import extract_table_names
-from txt2sql.shard_routing import ClarifyNeeded, resolve_routing
+from txt2sql.shard_routing import (
+    ClarifyNeeded,
+    ensure_discriminator_filters,
+    resolve_routing,
+)
 
 MAX_INTENT_RETRIES = 2
 CLARIFICATION_EXHAUSTED = (
@@ -196,6 +200,17 @@ def _catalog_covers_tables(
     return True
 
 
+def _last_human_text(state: dict[str, Any]) -> str:
+    """Conteúdo da última HumanMessage (para fallback de discriminador)."""
+    for msg in reversed(state.get("messages") or []):
+        if isinstance(msg, HumanMessage):
+            content = msg.content
+            if isinstance(content, str):
+                return content
+            return str(content or "")
+    return ""
+
+
 def _resolve_step_table(
     step: MaterializationStep,
     *,
@@ -267,43 +282,6 @@ def _bindings_for_table(
     return []
 
 
-def _fan_in_sharded_bindings(
-    *,
-    session: DuckDBSession,
-    table: TableConfig,
-    registry: DatabaseRegistry,
-    bindings: list[ShardBinding],
-) -> int:
-    """Materializa todos os físicos dos bindings no nome lógico (replace + append)."""
-    groups: dict[tuple[str, str], list[str]] = {}
-    for binding in bindings:
-        key = (binding.database_id, binding.physical_table)
-        groups.setdefault(key, []).append(binding.discriminator_value)
-
-    disc_col = table.sharding.discriminator_column if table.sharding else None
-    first = True
-    for (db_id, physical), values in groups.items():
-        engine = registry.get_engine(db_id)
-        filt = build_in_filter(disc_col, values) if disc_col else None
-        logger.info(
-            "Fan-in dual-path {!r}: banco={} físico={} valores={}",
-            table.id,
-            db_id,
-            physical,
-            values,
-        )
-        session.materialize(
-            table,
-            engine,
-            physical_name=physical,
-            filter_sql=filt,
-            replace=first,
-            append=not first,
-        )
-        first = False
-
-    count_rows = session.execute(f'SELECT COUNT(*) AS n FROM "{table.id}"')
-    return int(count_rows[0]["n"]) if count_rows else 0
 
 
 def _append_provenance_footer(
@@ -572,12 +550,15 @@ def build_graph(
 
     def resolve_and_route(state: GraphState) -> dict[str, Any]:
         plan = _coerce_intent_plan(state.get("intent_plan"))
-        routing_result = resolve_routing(plan, config)
+        routing_result = resolve_routing(
+            plan, config, extra_text=_last_human_text(state)
+        )
         if isinstance(routing_result, ClarifyNeeded):
-            clarify = IntentPlan(
-                status="needs_clarification",
-                question_rewrite=plan.question_rewrite,
-                clarification=Clarification(question=routing_result.question),
+            clarify = plan.model_copy(
+                update={
+                    "status": "needs_clarification",
+                    "clarification": Clarification(question=routing_result.question),
+                }
             )
             budget = _budget(state)
             if budget.exhausted("clarification_count"):
@@ -591,9 +572,11 @@ def build_graph(
                 "intent_plan": clarify.model_dump(),
                 "intent_route": "ask_clarification",
             }
+        plan = ensure_discriminator_filters(plan, routing_result, config)
         path = route_execution(plan, routing_result, config)
         logger.info("resolve_and_route: path={} shard_mode={}", path, routing_result.mode)
         return {
+            "intent_plan": plan.model_dump(),
             "shard_routing": routing_result.model_dump(),
             "execution_path": path,
             "intent_route": path,
@@ -743,12 +726,13 @@ def build_graph(
             )
 
             if table.is_sharded and len(bindings) >= 2:
-                total_rows = _fan_in_sharded_bindings(
+                result = fan_in(
                     session=session,
                     table=table,
                     registry=registry,
                     bindings=bindings,
                 )
+                total_rows = result.row_count
                 last_rows = session.execute(f'SELECT * FROM "{logical_name}" LIMIT 5')
                 source_queries_by_table[logical_name] = queries or [
                     f"fan-in:{len(bindings)} bindings"

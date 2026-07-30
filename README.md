@@ -10,11 +10,11 @@ Três diferenciais frente a um agente SQL tradicional:
 
 1. **Multi-banco + sharding determinístico** — `(discriminador) → (banco, tabela_física)`; fan-out é proibido.
 2. **Schema declarativo ou discovery** — YAML com descrições de negócio, ou reflection via SQLAlchemy.
-3. **DuckDB intermediário** — agregações/ordens/joins em tabelas volumétricas materializam em DuckDB (por `thread_id` no dual-path; efêmero por turno no ReAct legado).
+3. **DuckDB intermediário** — agregações/ordens/joins em tabelas volumétricas materializam em DuckDB (sessão por `thread_id`, reuse via sufficiency gate).
 
 ## Funcionalidades
 
-* **Grafo dual-path (padrão)** — `IntentPlan` → `resolve_and_route` → caminho *simple* ou *analytical*; passe `dual_path=False` para o loop ReAct legado com tools.
+* **Grafo dual-path** — `IntentPlan` → `resolve_and_route` → caminho *simple* ou *analytical*.
 * **Interpretação de intenção + HITL** — `interpret_intent` valida o plano; ambiguidade → clarificação (`interrupt` com checkpointer).
 * **Policy Gate + guardrail read-only** — validação fail-closed (sqlglot + regras de volume/`force_analytical`) antes de executar.
 * **Checkpointer externo** — a lib não gerencia sessão; o caller injeta `MemorySaver` ou equivalente.
@@ -35,7 +35,7 @@ Três diferenciais frente a um agente SQL tradicional:
 ├── tests/                      # Testes unitários (pytest)
 ├── docs/                       # Documentação (ver seção abaixo)
 └── txt2sql/                    # Pacote principal
-    ├── agent.py                # build_agent (+ grafo ReAct legado)
+    ├── agent.py                # build_agent (wrapper para graph.build_graph)
     ├── graph.py                # Grafo dual-path (padrão)
     ├── intent.py               # IntentPlan + validate_intent
     ├── artifacts.py            # Planos tipados, Budget, catálogo DuckDB
@@ -86,7 +86,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import HumanMessage
 
 config = load_config("examples/recebiveis.yaml")
-agent = build_agent(config, checkpointer=MemorySaver())  # dual_path=True por padrão
+agent = build_agent(config, checkpointer=MemorySaver())
 
 resultado = agent.invoke(
     {"messages": [HumanMessage(content="Total de recebíveis do CNPJ 12.345.678/0001-90?")]},
@@ -108,9 +108,9 @@ config = load_config(
 
 ## Observações e Restrições
 
-* Fan-out entre shards é proibido — no dual-path o sharding entra via `resolve_and_route`; no ReAct, resolva o shard (ou materialize multi) antes de consultar.
+* Fan-out entre shards é proibido — sharding entra via `resolve_and_route`; fan-in multi-shard via `db/fan_in`.
 * Queries de escrita são rejeitadas pelo guardrail / Policy Gate (fail-closed).
-* Dual-path: sessão DuckDB por `thread_id` (reuse via sufficiency gate). ReAct (`dual_path=False`): sessão efêmera por turno.
+* Sessão DuckDB por `thread_id` (reuse via sufficiency gate).
 * Clarificação HITL exige checkpointer; sem ele o grafo emite a pergunta e encerra.
 * O checkpointer é responsabilidade do caller.
 

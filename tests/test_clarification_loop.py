@@ -80,7 +80,7 @@ def test_clarification_budget_stops_loop(monkeypatch: Any) -> None:
     monkeypatch.setattr(
         "txt2sql.graph.build_llm", lambda config: ScriptedLLM([clarify])
     )
-    agent = build_agent(cfg, checkpointer=MemorySaver(), dual_path=True)
+    agent = build_agent(cfg, checkpointer=MemorySaver())
     thread = {"configurable": {"thread_id": "clarify-budget"}}
 
     max_c = Budget().max_clarifications

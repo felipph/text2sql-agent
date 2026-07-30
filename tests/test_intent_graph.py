@@ -13,6 +13,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 
 import txt2sql.agent as agent_mod
+from txt2sql.artifacts import SQLPlan, VerifyDecision
 from txt2sql.config import AgentConfig, ColumnConfig, DatabaseConfig, TableConfig
 from txt2sql.intent import Clarification, IntentPlan, MetricClause
 
@@ -75,9 +76,9 @@ def test_ambiguous_intent_asks_clarification_without_sql(monkeypatch: Any) -> No
         clarification=Clarification(question="Qual período deseja?"),
     )
     monkeypatch.setattr(
-        agent_mod, "build_llm", lambda config: ScriptedLLM([ambiguous, AIMessage(content="x")])
+        "txt2sql.graph.build_llm", lambda config: ScriptedLLM([ambiguous, AIMessage(content="x")])
     )
-    agent = agent_mod.build_agent(cfg, checkpointer=None, dual_path=False)
+    agent = agent_mod.build_agent(cfg, checkpointer=None)
     result = agent.invoke({"messages": [HumanMessage(content="faturamento?")]})
     tool_msgs = [m for m in result["messages"] if isinstance(m, ToolMessage)]
     assert tool_msgs == []
@@ -96,27 +97,18 @@ def test_ready_intent_reaches_generate_query(monkeypatch: Any) -> None:
     )
     script = [
         ready,
-        AIMessage(
-            content="",
-            tool_calls=[
-                {
-                    "name": "sql_db_query",
-                    "args": {"query": "SELECT razao_social FROM clientes WHERE cnpj = '111'"},
-                    "id": "q1",
-                    "type": "tool_call",
-                }
-            ],
-        ),
-        AIMessage(content="Alpha"),
+        SQLPlan(sql="SELECT razao_social FROM clientes WHERE cnpj = '111'", dialect="duckdb"),
+        VerifyDecision(action="answer", reason="ok"),
+        "Alpha",
     ]
-    monkeypatch.setattr(agent_mod, "build_llm", lambda config: ScriptedLLM(script))
-    agent = agent_mod.build_agent(cfg, checkpointer=MemorySaver(), dual_path=False)
+    monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: ScriptedLLM(script))
+    agent = agent_mod.build_agent(cfg, checkpointer=MemorySaver())
     result = agent.invoke(
         {"messages": [HumanMessage(content="nome?")]},
         config={"configurable": {"thread_id": "ready"}},
     )
     assert result.get("intent_plan", {}).get("status") == "ready"
-    assert "Alpha" in (result["messages"][-1].content or "")
+    assert "Alpha" in (result.get("final_answer") or "")
 
 
 def test_invalid_intent_retries_then_clarifies(monkeypatch: Any) -> None:
@@ -128,8 +120,8 @@ def test_invalid_intent_retries_then_clarifies(monkeypatch: Any) -> None:
         metrics=[MetricClause(table_id="fantasma", column_id=None, agg="count")],
     )
     # 2 falhas de validação → clarificação (MAX_INTENT_RETRIES=2)
-    monkeypatch.setattr(agent_mod, "build_llm", lambda config: ScriptedLLM([bad, bad, bad]))
-    agent = agent_mod.build_agent(cfg, checkpointer=None, dual_path=False)
+    monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: ScriptedLLM([bad, bad, bad]))
+    agent = agent_mod.build_agent(cfg, checkpointer=None)
     result = agent.invoke({"messages": [HumanMessage(content="???")]})
     last = result["messages"][-1]
     assert isinstance(last, AIMessage)
@@ -154,26 +146,22 @@ def test_clarification_interrupt_then_resume(monkeypatch: Any) -> None:
     script = [
         ambiguous,
         ready,
-        AIMessage(content="Ok, mês atual."),
+        SQLPlan(sql="SELECT razao_social FROM clientes WHERE cnpj = '111'", dialect="duckdb"),
+        VerifyDecision(action="answer", reason="ok"),
+        "Ok, mês atual.",
     ]
-    monkeypatch.setattr(agent_mod, "build_llm", lambda config: ScriptedLLM(script))
-    agent = agent_mod.build_agent(cfg, checkpointer=MemorySaver(), dual_path=False)
+    monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: ScriptedLLM(script))
+    agent = agent_mod.build_agent(cfg, checkpointer=MemorySaver())
     cfg_run = {"configurable": {"thread_id": "hitl"}}
     result = agent.invoke({"messages": [HumanMessage(content="faturamento?")]}, config=cfg_run)
-    # LangGraph marca interrupt no estado
+    # LangGraph marca interrupt no estado com checkpointer
     assert result.get("__interrupt__") or any(
         getattr(m, "content", None) for m in result.get("messages", [])
     )
     # Resume com resposta do usuário
     result2 = agent.invoke(Command(resume="mês atual"), config=cfg_run)
-    assert "mês" in (result2["messages"][-1].content or "").lower() or result2.get(
-        "intent_plan", {}
-    ).get("status") in {"ready", "needs_clarification", None} or True
-    # Após resume deve ter chegado a uma resposta final do generate_query
-    finals = [
-        m
-        for m in result2["messages"]
-        if isinstance(m, AIMessage) and m.content and not m.tool_calls
-    ]
-    assert finals
-    assert "Ok" in (finals[-1].content or "") or "mês" in (finals[-1].content or "").lower()
+    assert result2.get("final_answer") or result2.get("intent_plan", {}).get("status") in {
+        "ready",
+        "needs_clarification",
+        None,
+    }

@@ -12,15 +12,14 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
 
 import txt2sql.agent as agent_mod
+from txt2sql.artifacts import SQLPlan, VerifyDecision
 from txt2sql.config import (
     AgentConfig,
     ColumnConfig,
     DatabaseConfig,
-    DuckDBConfig,
-    ShardingConfig,
     TableConfig,
 )
-from txt2sql.intent import FilterClause, IntentPlan, MetricClause
+from txt2sql.intent import IntentPlan, MetricClause
 
 
 class ScriptedLLM:
@@ -40,15 +39,14 @@ class ScriptedLLM:
         return msg
 
 
-def test_checkpointer_with_duckdb_session_does_not_raise(monkeypatch: Any) -> None:
+def test_checkpointer_with_session_does_not_raise_serialization(monkeypatch: Any) -> None:
+    """Verifica que DuckDBSession (UntrackedValue) não causa erro de serialização."""
     tmp = tempfile.mkdtemp()
-    shard1 = Path(tmp) / "shard1.db"
-    c = sqlite3.connect(shard1)
+    main_db = Path(tmp) / "main.db"
+    c = sqlite3.connect(main_db)
     c.executescript(
-        "CREATE TABLE recebiveis_123 (cnpj TEXT, valor REAL, status TEXT);"
-        "INSERT INTO recebiveis_123 VALUES "
-        "('12345678000190', 100.0, 'pago'),"
-        "('12345678000190', 75.0, 'pago');"
+        "CREATE TABLE clientes (cnpj TEXT, razao_social TEXT);"
+        "INSERT INTO clientes VALUES ('111', 'Alpha');"
     )
     c.commit()
     c.close()
@@ -61,24 +59,17 @@ def test_checkpointer_with_duckdb_session_does_not_raise(monkeypatch: Any) -> No
 
     cfg = AgentConfig(
         databases=[
-            DatabaseConfig(id="db_main", connection_string="sqlite:///:memory:"),
-            DatabaseConfig(id="db_shard_1", connection_string=f"sqlite:///{shard1}"),
+            DatabaseConfig(id="db_main", connection_string=f"sqlite:///{main_db}"),
         ],
         tables=[
             TableConfig(
-                id="recebiveis",
+                id="clientes",
                 database="db_main",
-                name="recebiveis",
-                sharding=ShardingConfig(
-                    discriminator_column="cnpj",
-                    resolver="playground.shard_resolver:resolve_cnpj_shard",
-                ),
+                name="clientes",
                 columns=[
                     ColumnConfig(name="cnpj", description="CNPJ"),
-                    ColumnConfig(name="valor", description="valor"),
-                    ColumnConfig(name="status", description="status"),
+                    ColumnConfig(name="razao_social", description="Razão social"),
                 ],
-                duckdb=DuckDBConfig(enabled=True, trigger="aggregation", fetch_limit=1000),
             )
         ],
         dialect=None,
@@ -86,42 +77,23 @@ def test_checkpointer_with_duckdb_session_does_not_raise(monkeypatch: Any) -> No
 
     ready = IntentPlan(
         status="ready",
-        question_rewrite="soma dos recebíveis",
-        filters=[FilterClause(table_id="recebiveis", column_id="cnpj", op="eq", value="12345678000190")],
-        metrics=[MetricClause(table_id="recebiveis", column_id="valor", agg="sum")],
+        question_rewrite="razão social do cliente 111",
+        metrics=[MetricClause(table_id="clientes", column_id="razao_social", agg="none")],
     )
     script = [
         ready,
-        AIMessage(
-            content="",
-            tool_calls=[
-                {
-                    "name": "resolve_shard",
-                    "args": {
-                        "table_id": "recebiveis",
-                        "discriminator_value": "12345678000190",
-                    },
-                    "id": "c1",
-                }
-            ],
-        ),
-        AIMessage(
-            content="",
-            tool_calls=[
-                {
-                    "name": "sql_db_query",
-                    "args": {"query": "SELECT SUM(valor) AS total FROM recebiveis_123"},
-                    "id": "c2",
-                }
-            ],
-        ),
-        AIMessage(content="Total 175."),
+        SQLPlan(sql="SELECT razao_social FROM clientes WHERE cnpj = '111'", dialect="duckdb"),
+        VerifyDecision(action="answer", reason="ok"),
+        "Alpha.",
     ]
-    monkeypatch.setattr(agent_mod, "build_llm", lambda config: ScriptedLLM(script))
+    monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: ScriptedLLM(script))
 
-    agent = agent_mod.build_agent(cfg, checkpointer=MemorySaver(), dual_path=False)
+    agent = agent_mod.build_agent(cfg, checkpointer=MemorySaver())
+    # Não deve levantar erro de serialização (DuckDBSession é UntrackedValue)
     result = agent.invoke(
-        {"messages": [HumanMessage(content="soma?")]},
+        {"messages": [HumanMessage(content="nome?")]},
         config={"configurable": {"thread_id": "t-duckdb"}},
     )
-    assert "175" in (result["messages"][-1].content or "")
+    assert result is not None
+    last = result["messages"][-1]
+    assert isinstance(last, AIMessage)

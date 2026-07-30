@@ -21,7 +21,7 @@ uv sync                              # Instalar deps (ou: pip install -e ".[dev]
 
 ```
 txt2sql/           # Pacote
-  agent.py         # build_agent (+ ReAct legado se dual_path=False)
+  agent.py         # build_agent (wrapper fino para graph.build_graph)
   graph.py         # Grafo dual-path (padrão)
   intent.py        # IntentPlan + validate_intent
   artifacts.py     # Planos tipados, Budget, DuckDBCatalog
@@ -44,13 +44,13 @@ docs/superpowers/  # Specs e plans de features (não é doc de produto)
 - `materialize` no DuckDB usa lotes (`BATCH_SIZE`); não usar `fetchall` na origem.
 - Guardrail / Policy Gate são fail-closed: qualquer dúvida → rejeitar.
 - Antes do SQL: `interpret_intent` valida um `IntentPlan`; ambiguidade → HITL (`interrupt` com checkpointer).
-- Dual-path (padrão): `build_agent(...)` usa grafo simple|analytical; passe `dual_path=False` para ReAct legado.
+- `build_agent(...)` usa o grafo dual-path (simple|analytical); stack ReAct removido.
 
 ## Gotchas
 
 - Checkpointer **não** é criado pela lib — passe via `build_agent(..., checkpointer=...)`. HITL/resume exige checkpointer + `Command(resume=...)`.
 - Clarificação: `Budget.max_clarifications` (default 2); esgotado → `finish` com mensagem, sem SQL.
-- Tabelas shardadas (ReAct): single → `resolve_shard` antes de `sql_db_query`; multi (2+) → `materialize_sharded_table` e query no nome lógico. Fan-out cego é proibido. No dual-path, sharding via `resolve_routing` — não chame tools de shard manualmente.
+- Sharding via `resolve_routing` determinístico; fan-in multi-shard via `db/fan_in.fan_in(bindings)`. Fan-out cego é proibido.
 - Sem `columns` no YAML → discovery no `database` de referência; com `columns` → declarativo.
 - Env vars de banco vêm de `connection_env` no YAML (ex.: `MAIN_DB_URL`), não de nomes fixos.
 - `AZURE_OPENAI_*` são obrigatórias se o bloco `llm` do YAML estiver incompleto.

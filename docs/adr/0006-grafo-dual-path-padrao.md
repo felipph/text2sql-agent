@@ -1,6 +1,7 @@
 ---
 status: accepted
 date: 2026-07-28
+amended: 2026-07-29
 decision-makers: maintainers txt2sql
 ---
 
@@ -52,3 +53,16 @@ Chosen option: **grafo dual-path como padrão** em `build_agent(..., dual_path=T
 
 - Testes em `tests/test_graph_dual_path.py`, `test_path_routing.py`, `test_shard_routing.py`, `test_policy_gate.py`, `test_clarification_loop.py`
 - Smoke `smoke_test_graph.py` cobre o caminho compilado
+
+## Emenda 2026-07-29 — Remoção do stack ReAct e unificação do fan-in
+
+**Decisão:** o stack ReAct (`dual_path=False`) foi **removido**. `build_agent` não aceita mais o kwarg `dual_path`; só o grafo dual-path é mantido.
+
+**Razão:** ReAct e dual-path divergiam em sharding, segurança (policy gate) e DuckDB lifetime. Manter os dois impedia localidade de bugs e exigia documentação bifurcada. Todos os callers internos usavam `dual_path=True`.
+
+**Consequências:**
+- `agent.py` é agora um wrapper fino que delega para `graph.build_graph`
+- `db/multi_shard.py` foi removido; `db/fan_in.py` substitui com interface `fan_in(session, table, registry, bindings) → FanInResult`
+- `_fan_in_sharded_bindings` em `graph.py` foi removido; o grafo chama `fan_in()` diretamente
+- Fan-in agora verifica existência de tabela física (gap que `_fan_in_sharded_bindings` não cobria)
+- Testes anteriores de ReAct migrados para o dual-path; `test_multi_shard.py` substituído por `test_fan_in.py`

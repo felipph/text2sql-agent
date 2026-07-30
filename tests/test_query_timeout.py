@@ -265,39 +265,22 @@ def test_execute_queries_timeout_becomes_tool_message(monkeypatch: Any) -> None:
             )
         ],
     )
+    from txt2sql.artifacts import SQLPlan, VerifyDecision
+
     script = [
         ready,
-        AIMessage(
-            content="",
-            tool_calls=[
-                {
-                    "name": "sql_db_query",
-                    "args": {
-                        "query": "SELECT razao_social FROM clientes WHERE cnpj = '111'"
-                    },
-                    "id": "q1",
-                    "type": "tool_call",
-                }
-            ],
-        ),
-        AIMessage(content="Não consegui a tempo."),
+        SQLPlan(sql="SELECT razao_social FROM clientes WHERE cnpj = '111'", dialect="duckdb"),
+        VerifyDecision(action="answer", reason="timeout"),
+        "Não consegui a tempo.",
     ]
-    monkeypatch.setattr(agent_mod, "build_llm", lambda config: ScriptedLLM(script))
+    monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: ScriptedLLM(script))
     monkeypatch.setattr(DatabaseRegistry, "execute", boom)
 
-    agent = agent_mod.build_agent(cfg, checkpointer=MemorySaver(), dual_path=False)
+    agent = agent_mod.build_agent(cfg, checkpointer=MemorySaver())
     result = agent.invoke(
         {"messages": [HumanMessage(content="nome?")]},
         config={"configurable": {"thread_id": "timeout-q"}},
     )
-    tool_msgs = [m for m in result["messages"] if isinstance(m, ToolMessage)]
-    assert tool_msgs, "esperava ToolMessage de timeout"
-    assert any(
-        "timeout" in str(m.content).lower() and "Simplifique" in str(m.content)
-        for m in tool_msgs
-    ), f"mensagens: {[m.content for m in tool_msgs]}"
-    assert result.get("page_count", 0) >= 1
-    assert any(
-        isinstance(m, AIMessage) and m.content == "Não consegui a tempo."
-        for m in result["messages"]
-    )
+    # Dual-path: timeout vira last_result com status "timeout"
+    last_result = result.get("last_result") or {}
+    assert last_result.get("status") == "timeout", f"last_result={last_result}"

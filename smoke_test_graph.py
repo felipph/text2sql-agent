@@ -137,7 +137,7 @@ script = [
 # injeta o LLM falso
 agent_mod.build_llm = lambda config: ScriptedLLM(script)  # type: ignore
 
-agent = agent_mod.build_agent(cfg, dual_path=False)
+agent = agent_mod.build_agent(cfg)
 
 from langchain_core.messages import HumanMessage
 

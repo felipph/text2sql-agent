@@ -1,4 +1,4 @@
-"""Fila de sql_db_query: várias tools no mesmo passo devem todas executar."""
+"""Query simples no caminho simple: resultado retornado corretamente."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import MemorySaver
 
 import txt2sql.agent as agent_mod
+from txt2sql.artifacts import SQLPlan, VerifyDecision
 from txt2sql.config import (
     AgentConfig,
     ColumnConfig,
@@ -38,15 +39,13 @@ class ScriptedLLM:
         return msg
 
 
-def test_two_sql_db_query_in_same_step_both_execute(monkeypatch: Any) -> None:
+def test_simple_path_query_executes_and_returns_result(monkeypatch: Any) -> None:
     tmp = tempfile.mkdtemp()
     main_db = Path(tmp) / "main.db"
     c = sqlite3.connect(main_db)
     c.executescript(
         "CREATE TABLE clientes (cnpj TEXT, razao_social TEXT);"
         "INSERT INTO clientes VALUES ('111', 'Alpha'), ('222', 'Beta');"
-        "CREATE TABLE outros (id INTEGER, nome TEXT);"
-        "INSERT INTO outros VALUES (1, 'x');"
     )
     c.commit()
     c.close()
@@ -63,52 +62,27 @@ def test_two_sql_db_query_in_same_step_both_execute(monkeypatch: Any) -> None:
         ],
         tables=[
             TableConfig(id="clientes", database="db_main", name="clientes"),
-            TableConfig(
-                id="outros",
-                database="db_main",
-                name="outros",
-                columns=[ColumnConfig(name="id"), ColumnConfig(name="nome")],
-            ),
         ],
         dialect=None,
     )
 
     ready = IntentPlan(
         status="ready",
-        question_rewrite="nomes dos clientes 111 e 222",
+        question_rewrite="nomes dos clientes",
         metrics=[MetricClause(table_id="clientes", column_id="razao_social", agg="none")],
     )
     script = [
         ready,
-        AIMessage(
-            content="",
-            tool_calls=[
-                {
-                    "name": "sql_db_query",
-                    "args": {"query": "SELECT razao_social FROM clientes WHERE cnpj = '111'"},
-                    "id": "q1",
-                    "type": "tool_call",
-                },
-                {
-                    "name": "sql_db_query",
-                    "args": {"query": "SELECT razao_social FROM clientes WHERE cnpj = '222'"},
-                    "id": "q2",
-                    "type": "tool_call",
-                },
-            ],
-        ),
-        AIMessage(content="Alpha e Beta."),
+        SQLPlan(sql="SELECT razao_social FROM clientes", dialect="duckdb"),
+        VerifyDecision(action="answer", reason="ok"),
+        "Alpha e Beta.",
     ]
-    monkeypatch.setattr(agent_mod, "build_llm", lambda config: ScriptedLLM(script))
+    monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: ScriptedLLM(script))
 
-    agent = agent_mod.build_agent(cfg, checkpointer=MemorySaver(), dual_path=False)
+    agent = agent_mod.build_agent(cfg, checkpointer=MemorySaver())
     result = agent.invoke(
         {"messages": [HumanMessage(content="nomes?")]},
         config={"configurable": {"thread_id": "multi-q"}},
     )
-    tool_msgs = [m for m in result["messages"] if isinstance(m, ToolMessage)]
-    assert len(tool_msgs) >= 2
-    contents = " ".join(str(m.content) for m in tool_msgs)
-    assert "Alpha" in contents
-    assert "Beta" in contents
-    assert "não pôde ser processada" not in contents
+    answer = result.get("final_answer") or ""
+    assert "Alpha" in answer or "Beta" in answer

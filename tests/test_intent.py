@@ -155,3 +155,33 @@ def test_build_intent_prompt_mentions_clarification() -> None:
     assert "needs_clarification" in text
     assert "CNPJ" in text
     assert "Cadastro" in text
+
+
+def test_build_intent_prompt_requires_discriminator_in_filters() -> None:
+    from txt2sql.config import (
+        AgentConfig,
+        DatabaseConfig,
+        ShardingConfig,
+        TableConfig,
+    )
+    from txt2sql.prompts import Txt2SqlPromptBuilder
+
+    config = AgentConfig(
+        databases=[DatabaseConfig(id="db", connection_string="sqlite:///:memory:")],
+        tables=[
+            TableConfig(
+                id="recebiveis",
+                database="db",
+                name="recebiveis",
+                sharding=ShardingConfig(
+                    discriminator_column="cnpj",
+                    resolver="playground.shard_resolver:resolve_cnpj_shard",
+                ),
+            )
+        ],
+    )
+    text = Txt2SqlPromptBuilder(config).build_intent_prompt()
+    assert "discriminador" in text.lower()
+    assert "filters" in text
+    assert "question_rewrite" in text
+    assert "cnpj" in text.lower()

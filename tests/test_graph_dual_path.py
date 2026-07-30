@@ -27,7 +27,7 @@ from txt2sql.config import (
     TableConfig,
 )
 from txt2sql.graph import MaterializationCheck
-from txt2sql.intent import FilterClause, IntentPlan, JoinClause, JoinOn, MetricClause
+from txt2sql.intent import FilterClause, IntentPlan, JoinClause, JoinOn, MetricClause, EntityRef
 
 
 class GateDecision:
@@ -164,7 +164,7 @@ def test_simple_path_clientes_final_answer(monkeypatch: Any) -> None:
         "O cliente 111 é Alpha.",
     ]
     monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: ScriptedLLM(script))
-    agent = build_agent(cfg, checkpointer=None, dual_path=True)
+    agent = build_agent(cfg, checkpointer=None)
     result = agent.invoke({"messages": [HumanMessage(content="nome do cliente 111?")]})
 
     assert result.get("execution_path") == "simple"
@@ -210,7 +210,7 @@ def test_analytical_path_force_analytical_reaches_answer(monkeypatch: Any) -> No
         "O total de recebíveis é R$ 175,00.",
     ]
     monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: ScriptedLLM(script))
-    agent = build_agent(cfg, checkpointer=MemorySaver(), dual_path=True)
+    agent = build_agent(cfg, checkpointer=MemorySaver())
     assert "check_materialization" in agent.get_graph().nodes
     result = agent.invoke(
         {"messages": [HumanMessage(content="total recebíveis CNPJ 12345678000190?")]},
@@ -241,7 +241,7 @@ def test_simple_path_rejected_sql_reaches_answer(monkeypatch: Any) -> None:
         "Não foi possível executar a operação solicitada (SQL rejeitado).",
     ]
     monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: ScriptedLLM(script))
-    agent = build_agent(cfg, checkpointer=None, dual_path=True)
+    agent = build_agent(cfg, checkpointer=None)
     result = agent.invoke({"messages": [HumanMessage(content="apague todos os clientes")]})
 
     last = result.get("last_result") or {}
@@ -260,13 +260,37 @@ def test_missing_discriminator_clarifies(monkeypatch: Any) -> None:
         metrics=[MetricClause(table_id="recebiveis", column_id="valor", agg="sum")],
     )
     monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: ScriptedLLM([ready, ready]))
-    agent = build_agent(cfg, checkpointer=None, dual_path=True)
+    agent = build_agent(cfg, checkpointer=None)
     result = agent.invoke({"messages": [HumanMessage(content="total recebíveis?")]})
 
     last_msg = result["messages"][-1]
     content = (getattr(last_msg, "content", None) or "").lower()
     assert "cnpj" in content
     assert result.get("final_answer") is None
+
+
+def test_missing_discriminator_preserves_intent_fields(monkeypatch: Any) -> None:
+    """ClarifyNeeded não deve zerar metrics do IntentPlan (trace UX)."""
+    _env()
+    cfg = _cfg_sharded_no_disc()
+    ready = IntentPlan(
+        status="ready",
+        question_rewrite="soma dos recebíveis",
+        metrics=[MetricClause(table_id="recebiveis", column_id="valor", agg="sum")],
+        entities=[
+            EntityRef(mention="recebíveis", table_id="recebiveis", role="table"),
+        ],
+    )
+    monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: ScriptedLLM([ready]))
+    agent = build_agent(cfg, checkpointer=None)
+    result = agent.invoke({"messages": [HumanMessage(content="soma dos recebíveis?")]})
+
+    plan = result.get("intent_plan") or {}
+    assert plan.get("status") == "needs_clarification"
+    assert plan.get("metrics"), "metrics do intent não podem ser apagados na clarificação"
+    assert plan["metrics"][0]["table_id"] == "recebiveis"
+    assert plan.get("entities"), "entities do intent não podem ser apagados na clarificação"
+    assert "cnpj" in ((plan.get("clarification") or {}).get("question") or "").lower()
 
 
 def test_check_materialization_retries_plan(monkeypatch: Any) -> None:
@@ -370,7 +394,7 @@ def test_check_materialization_retries_plan(monkeypatch: Any) -> None:
         "Total R$ 100,00.",
     ]
     monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: ScriptedLLM(script))
-    agent = build_agent(cfg, checkpointer=MemorySaver(), dual_path=True)
+    agent = build_agent(cfg, checkpointer=MemorySaver())
     result = agent.invoke(
         {"messages": [HumanMessage(content="total recebíveis do CNPJ?")]},
         config={"configurable": {"thread_id": "mat-retry"}},
@@ -423,7 +447,7 @@ def test_catalog_preserved_across_turns(monkeypatch: Any) -> None:
         "175 again.",
     ]
     monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: ScriptedLLM(script))
-    agent = build_agent(cfg, checkpointer=MemorySaver(), dual_path=True)
+    agent = build_agent(cfg, checkpointer=MemorySaver())
     thread_cfg = {"configurable": {"thread_id": "catalog-reuse"}}
     r1 = agent.invoke(
         {"messages": [HumanMessage(content="total?")]},
@@ -506,7 +530,7 @@ def test_analytical_invented_target_table_still_materializes(monkeypatch: Any) -
         "Total 175.",
     ]
     monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: ScriptedLLM(script))
-    agent = build_agent(cfg, checkpointer=MemorySaver(), dual_path=True)
+    agent = build_agent(cfg, checkpointer=MemorySaver())
     result = agent.invoke(
         {"messages": [HumanMessage(content="total?")]},
         config={"configurable": {"thread_id": "invented-target"}},
@@ -616,7 +640,7 @@ def test_analytical_multi_shard_fan_in_sums_all_cnpjs(monkeypatch: Any) -> None:
         "Total 4121.55",
     ]
     monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: ScriptedLLM(script))
-    agent = build_agent(cfg, checkpointer=MemorySaver(), dual_path=True)
+    agent = build_agent(cfg, checkpointer=MemorySaver())
     result = agent.invoke(
         {"messages": [HumanMessage(content="soma dos dois?")]},
         config={"configurable": {"thread_id": "multi-fan-in"}},
@@ -684,7 +708,7 @@ def test_analytical_join_clientes_materialized_in_duckdb(monkeypatch: Any) -> No
         "tabela ok",
     ]
     monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: ScriptedLLM(script))
-    agent = build_agent(cfg, checkpointer=MemorySaver(), dual_path=True)
+    agent = build_agent(cfg, checkpointer=MemorySaver())
     result = agent.invoke(
         {"messages": [HumanMessage(content="tabela cnpj nome valor?")]},
         config={"configurable": {"thread_id": "multi-join"}},
@@ -748,7 +772,7 @@ def test_analytical_ensures_intent_table_omitted_from_mat_plan(monkeypatch: Any)
         "ok",
     ]
     monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: ScriptedLLM(script))
-    agent = build_agent(cfg, checkpointer=MemorySaver(), dual_path=True)
+    agent = build_agent(cfg, checkpointer=MemorySaver())
     result = agent.invoke(
         {"messages": [HumanMessage(content="tabela?")]},
         config={"configurable": {"thread_id": "ensure-clientes"}},
@@ -818,7 +842,7 @@ def test_analytical_refines_after_physical_shard_sql(monkeypatch: Any) -> None:
         "tabela ok",
     ]
     monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: ScriptedLLM(script))
-    agent = build_agent(cfg, checkpointer=MemorySaver(), dual_path=True)
+    agent = build_agent(cfg, checkpointer=MemorySaver())
     result = agent.invoke(
         {"messages": [HumanMessage(content="tabela?")]},
         config={"configurable": {"thread_id": "refine-physical"}},
