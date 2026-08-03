@@ -35,10 +35,14 @@ from txt2sql.analytical_planning import (
 )
 from txt2sql.answer_grounding import (
     answer_contradicts_ok_result,
+    build_answer_provenance,
+    build_partial_user_notice,
     filter_messages_for_answer,
     format_answer_from_sample,
+    strip_provenance_from_answer,
 )
 from txt2sql.artifacts import (
+    AnswerProvenance,
     Budget,
     DuckDBCatalog,
     ExecutionResult,
@@ -94,6 +98,7 @@ class GraphState(MessagesState):
     mat_ready: bool
     partial: bool
     final_answer: str | None
+    answer_provenance: AnswerProvenance | None
     duckdb_session: Annotated[DuckDBSession | None, UntrackedValue]
 
 
@@ -190,43 +195,6 @@ def _last_human_text(state: dict[str, Any]) -> str:
                 return content
             return str(content or "")
     return ""
-
-
-def _append_provenance_footer(
-    text: str,
-    *,
-    sql_history: list[str],
-    assumptions: list[str],
-    partial: bool,
-    last_result: ExecutionResult | dict[str, Any] | None,
-) -> str:
-    """Anexa bloco de proveniência se o LLM não incluiu '---'."""
-    if "---" in text:
-        return text
-    result: ExecutionResult | None = None
-    if isinstance(last_result, ExecutionResult):
-        result = last_result
-    elif last_result:
-        result = ExecutionResult.model_validate(last_result)
-    lines: list[str] = []
-    if sql_history:
-        lines.append("SQL: " + "; ".join(sql_history))
-    if assumptions:
-        lines.append("Assunções: " + "; ".join(assumptions))
-    lines.append(f"Parcial: {'sim' if partial else 'não'}")
-    if result is not None:
-        status = result.status or ""
-        warnings = result.warnings or []
-        if status:
-            detail = status
-            if warnings:
-                detail += f" — {', '.join(str(w) for w in warnings)}"
-            lines.append(f"Status: {detail}")
-        elif warnings:
-            lines.append(f"Avisos: {', '.join(str(w) for w in warnings)}")
-    if not lines:
-        return text
-    return text.rstrip() + "\n\n---\n" + "\n".join(lines)
 
 
 def _compact_from_state(
@@ -336,6 +304,7 @@ def build_graph(
             "mat_ready": False,
             "partial": False,
             "final_answer": None,
+            "answer_provenance": None,
             "duckdb_session": session,
         }
 
@@ -951,7 +920,14 @@ def build_graph(
         sql_history = list(state.get("executed_sql_history") or [])
         partial = bool(state.get("partial", False))
         assumptions = list(plan.assumptions or [])
+        shard = _shard_routing(state)
         clean_messages = filter_messages_for_answer(list(state.get("messages") or []))
+        partial_notice = build_partial_user_notice(
+            assumptions=assumptions,
+            partial=partial,
+            max_shards=agent_config.max_shards,
+            shard_routing=shard,
+        )
         context = (
             "Responda ao usuário em PT-BR com base no IntentPlan e last_result.\n"
             "REGRAS OBRIGATÓRIAS:\n"
@@ -959,31 +935,42 @@ def build_graph(
             "apresentar esses dados (preferencialmente em tabela markdown). "
             "NUNCA diga que a consulta falhou, que faltou discriminador/CNPJ, "
             "ou que não foi possível executar — isso já foi resolvido pelo sistema.\n"
-            "- Se partial=true, diga claramente que a cobertura é parcial e cite "
-            "as assumptions relevantes (ex.: max_shards).\n"
+            "- NÃO inclua bloco de proveniência, SQL executado, assunções técnicas "
+            "nem rodapé com '---'. Essa informação fica só no sistema.\n"
             "- Ignore mensagens antigas do sistema sobre falta de discriminador.\n"
-            "Inclua no final um bloco separado por '---' com proveniência:\n"
-            "- SQL executado\n"
-            "- Assunções do intent\n"
-            "- Parcial: sim/não\n"
-            "- Status e avisos do last_result\n"
+            "- NÃO mencione nomes de parâmetros internos (max_shards, filters, "
+            "IntentPlan, etc.).\n"
+        )
+        if partial_notice:
+            context += (
+                "- A resposta é INCOMPLETA. Ao final da resposta (após os dados), "
+                "inclua este aviso ao usuário, em tom natural (pode adaptar levemente "
+                "a redação, mantendo o sentido):\n"
+                f"  «{partial_notice}»\n"
+            )
+        else:
+            context += "- Não diga que a resposta é parcial se partial=false.\n"
+        context += (
             f"IntentPlan:\n{_dump_json(plan)}\n"
             f"last_result:\n{_dump_json(last)}\n"
-            f"executed_sql_history:\n{json.dumps(sql_history, ensure_ascii=False)}\n"
             f"partial: {partial}\n"
         )
         response = answer_llm.invoke([SystemMessage(content=context), *clean_messages])
         text = (
             response if isinstance(response, str) else getattr(response, "content", str(response))
         )
-        if answer_contradicts_ok_result(str(text), last):
+        text = strip_provenance_from_answer(str(text))
+        if answer_contradicts_ok_result(text, last):
             text = format_answer_from_sample(
                 last,  # type: ignore[arg-type]
                 partial=partial,
                 assumptions=assumptions,
+                max_shards=agent_config.max_shards,
+                shard_routing=shard,
             )
-        text = _append_provenance_footer(
-            text,
+        elif partial_notice and "incompleta" not in text.lower():
+            text = text.rstrip() + "\n\n" + partial_notice
+        provenance = build_answer_provenance(
             sql_history=sql_history,
             assumptions=assumptions,
             partial=partial,
@@ -991,6 +978,7 @@ def build_graph(
         )
         return {
             "final_answer": text,
+            "answer_provenance": provenance,
             "messages": [AIMessage(content=text)],
         }
 

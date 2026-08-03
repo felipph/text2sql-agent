@@ -65,9 +65,12 @@ def test_format_answer_from_sample() -> None:
     text = format_answer_from_sample(
         last,
         partial=True,
-        assumptions=["Cobertura parcial: 20 de 625 shards"],
+        assumptions=["Cobertura parcial: 20 de 625 shards físicos (max_shards=20)"],
+        max_shards=20,
     )
     assert "111" in text
     assert "razao_social" in text
-    assert "parcial" in text.lower()
+    assert "incompleta" in text.lower()
     assert "625" in text
+    assert "max_shards" not in text.lower()
+    assert "Assunções:" not in text

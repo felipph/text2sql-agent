@@ -109,6 +109,24 @@ def extract_state_debug(result: dict[str, Any]) -> TurnDebug:
     else:
         debug.assumptions = list(intent.get("assumptions") or [])
 
+    # Preferir proveniência tipada do nó answer (trace) quando presente.
+    prov = result.get("answer_provenance")
+    if prov is not None:
+        if hasattr(prov, "model_dump"):
+            pdata = prov.model_dump()
+        elif isinstance(prov, dict):
+            pdata = prov
+        else:
+            pdata = {}
+        if pdata.get("sql_history"):
+            debug.sql_history = list(pdata["sql_history"])
+        if "partial" in pdata:
+            debug.partial = bool(pdata["partial"])
+        if pdata.get("assumptions") is not None:
+            debug.assumptions = list(pdata["assumptions"] or [])
+        if pdata.get("last_result_status"):
+            debug.last_result_status = str(pdata["last_result_status"])
+
     for i, sql in enumerate(debug.sql_history, start=1):
         debug.steps.append(
             DebugStep(

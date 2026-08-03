@@ -7,8 +7,8 @@ services:
       POSTGRES_DB: txt2sql
     ports:
       - "15432:5432"
-    volumes:
-      - ./seed/01_main.sql:/docker-entrypoint-initdb.d/01_main.sql:ro
+    # volumes:
+      # - ./seed/01_main.sql:/docker-entrypoint-initdb.d/01_main.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U txt2sql -d txt2sql"]
       interval: 3s
@@ -23,8 +23,8 @@ services:
       POSTGRES_DB: txt2sql
     ports:
       - "15433:5432"
-    volumes:
-      - ./seed/02_shard1.sql:/docker-entrypoint-initdb.d/01_shard.sql:ro
+    # volumes:
+      # - ./seed/02_shard1.sql:/docker-entrypoint-initdb.d/01_shard.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U txt2sql -d txt2sql"]
       interval: 3s
@@ -39,8 +39,8 @@ services:
       POSTGRES_DB: txt2sql
     ports:
       - "15434:5432"
-    volumes:
-      - ./seed/03_shard2.sql:/docker-entrypoint-initdb.d/01_shard.sql:ro
+    # volumes:
+      # - ./seed/03_shard2.sql:/docker-entrypoint-initdb.d/01_shard.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U txt2sql -d txt2sql"]
       interval: 3s

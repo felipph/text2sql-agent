@@ -2,12 +2,12 @@ prompts:
 - id: single_sum
   label: Soma CNPJ único (Cliente_000)
   question: Qual a soma dos valores dos recebíveis do CNPJ 65410433218196?
-  expected: '1789.28'
+  expected: '22719.03'
   notes: Deve usar resolve_shard → shard2 / recebiveis_654
 - id: multi_sum
   label: Multi-CNPJ Cliente_000 + Cliente_001
-  question: Qual a soma total dos recebíveis dos CNPJs 65410433218196 e 74778161849593?
-  expected: '4121.55'
+  question: Qual a soma total dos recebíveis dos CNPJs 65410433218196 e 59798543534624?
+  expected: '47917.59'
   notes: Deve chamar materialize_sharded_table se estiverem em shards distintos
 - id: join_vencido
   label: Join — cliente com vencido

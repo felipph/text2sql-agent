@@ -73,6 +73,17 @@ class ShardRouting(BaseModel):
     cap_assumption: str | None = None
 
 
+class AnswerProvenance(BaseModel):
+    """Proveniência da resposta para trace/debug — não exibida ao usuário."""
+
+    sql_history: list[str] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+    partial: bool = False
+    last_result_status: str | None = None
+    last_result_warnings: list[str] = Field(default_factory=list)
+    row_count: int | None = None
+
+
 class SQLPlan(BaseModel):
     """Plano SQL tipado antes da execução.
 
@@ -187,6 +198,7 @@ class VerifyDecision(BaseModel):
 
 
 __all__ = [
+    "AnswerProvenance",
     "Budget",
     "DuckDBCatalog",
     "DuckDBTableInfo",

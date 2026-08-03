@@ -251,6 +251,9 @@ def test_answer_fallback_when_llm_claims_failure_despite_ok_result(monkeypatch: 
     answer = result.get("final_answer") or ""
     assert "Não consegui" not in answer
     assert "Alpha" in answer
+    assert "Proveniência" not in answer
+    assert "---" not in answer or "Proveniência" not in answer
+    assert result.get("answer_provenance") is not None
     assert result.get("last_result")
     assert _d(result["last_result"]).get("status") == "ok"
 
