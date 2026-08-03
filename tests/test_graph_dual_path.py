@@ -29,6 +29,7 @@ from txt2sql.config import (
     ColumnRef,
     DatabaseConfig,
     DuckDBConfig,
+    ExportConfig,
     RelationshipConfig,
     ShardingConfig,
     ShardResult,
@@ -227,6 +228,186 @@ def test_simple_path_clientes_final_answer(monkeypatch: Any) -> None:
     assert any(r.get("razao_social") == "Alpha" for r in last.get("sample", []))
     assert result.get("final_answer")
     assert "Alpha" in result["final_answer"]
+
+
+def test_export_csv_graph_generates_url(monkeypatch: Any, tmp_path: Path) -> None:
+    """Pedido wants_export com dados materializados → export_url + link na resposta."""
+    _env()
+    tmp = Path(tempfile.mkdtemp())
+    main_db = tmp / "main.db"
+    shard_db = tmp / "shard.db"
+    conn = sqlite3.connect(main_db)
+    conn.executescript(
+        "CREATE TABLE clientes (cnpj TEXT, razao_social TEXT);"
+        "INSERT INTO clientes VALUES ('11100000000191', 'Acme');"
+    )
+    conn.commit()
+    conn.close()
+    conn = sqlite3.connect(shard_db)
+    conn.executescript(
+        "CREATE TABLE recebiveis_111 (cnpj TEXT, valor REAL, status TEXT);"
+        "INSERT INTO recebiveis_111 VALUES ('11100000000191', 100.0, 'pago');"
+        "INSERT INTO recebiveis_111 VALUES ('11100000000191', 50.0, 'vencido');"
+    )
+    conn.commit()
+    conn.close()
+
+    export_dir = tmp_path / "exports"
+    cfg = AgentConfig(
+        databases=[
+            DatabaseConfig(id="db_main", connection_string=f"sqlite:///{main_db}"),
+            DatabaseConfig(id="db_shard_1", connection_string=f"sqlite:///{shard_db}"),
+        ],
+        tables=[
+            TableConfig(
+                id="clientes",
+                database="db_main",
+                name="clientes",
+                columns=[ColumnConfig(name="cnpj"), ColumnConfig(name="razao_social")],
+                duckdb=DuckDBConfig(enabled=True, trigger="join", fetch_limit=1000),
+            ),
+            TableConfig(
+                id="recebiveis",
+                database="db_main",
+                name="recebiveis",
+                sharding=ShardingConfig(
+                    discriminator_column="cnpj",
+                    resolver="tests.test_graph_dual_path:_resolve_lookup_shard",
+                ),
+                columns=[
+                    ColumnConfig(name="cnpj"),
+                    ColumnConfig(name="valor"),
+                    ColumnConfig(name="status"),
+                ],
+                duckdb=DuckDBConfig(
+                    enabled=True, force_analytical=True, fetch_limit=1000
+                ),
+            ),
+        ],
+        relationships=[
+            RelationshipConfig(
+                from_ref=ColumnRef(table="recebiveis", column="cnpj"),
+                to_ref=ColumnRef(table="clientes", column="cnpj"),
+            )
+        ],
+        export=ExportConfig(
+            enabled=True,
+            dir=str(export_dir),
+            base_url="http://localhost/exports",
+            delimiter=";",
+            max_rows=1000,
+        ),
+        max_shards=20,
+    )
+    ready = IntentPlan(
+        status="ready",
+        wants_export=True,
+        question_rewrite="exportar lista completa em csv",
+        filters=[
+            FilterClause(
+                table_id="recebiveis",
+                column_id="cnpj",
+                op="eq",
+                value="11100000000191",
+            )
+        ],
+        entities=[
+            EntityRef(mention="clientes", table_id="clientes", role="table"),
+            EntityRef(mention="recebiveis", table_id="recebiveis", role="table"),
+        ],
+        joins=[
+            JoinClause(
+                from_table_id="recebiveis",
+                to_table_id="clientes",
+                on=[JoinOn(from_column="cnpj", to_column="cnpj")],
+            )
+        ],
+        metrics=[MetricClause(table_id="recebiveis", column_id="valor", agg="sum")],
+    )
+    script = [
+        ready,
+        MaterializationPlan(
+            steps=[
+                MaterializationStep(
+                    source_query="SELECT cnpj, valor, status FROM recebiveis_111",
+                    target_table="recebiveis",
+                    mode="replace",
+                ),
+                MaterializationStep(
+                    source_query="SELECT cnpj, razao_social FROM clientes",
+                    target_table="clientes",
+                    mode="replace",
+                ),
+            ],
+            rationale="export prep",
+        ),
+        "Segue o link para download.",
+    ]
+    monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: ScriptedLLM(script))
+    monkeypatch.setattr(
+        "txt2sql.analytical_planning.build_deterministic_mat_plan",
+        lambda *_a, **_k: None,
+    )
+    agent = build_agent(cfg, checkpointer=MemorySaver())
+    result = agent.invoke(
+        {"messages": [HumanMessage(content="exporte a lista completa em CSV")]},
+        config={"configurable": {"thread_id": "export-csv-1"}},
+    )
+    assert result.get("wants_export") is True
+    url = result.get("export_url")
+    assert url and url.startswith("http://localhost/exports/")
+    assert result.get("export_result")
+    assert (result["final_answer"] or "").find(url) >= 0
+    files = list(export_dir.glob("*.csv"))
+    assert len(files) == 1
+    content = files[0].read_text(encoding="utf-8")
+    assert ";" in content
+    assert "11100000000191" in content
+
+
+def test_export_csv_disabled_message(monkeypatch: Any) -> None:
+    _env()
+    cfg = _cfg_clientes_db()
+    ready = IntentPlan(
+        status="ready",
+        wants_export=True,
+        question_rewrite="exportar csv",
+        entities=[EntityRef(mention="c", table_id="clientes", role="table")],
+        metrics=[MetricClause(table_id="clientes", column_id="cnpj", agg="none")],
+    )
+    mat_plan = MaterializationPlan(
+        steps=[
+            MaterializationStep(
+                source_query="SELECT cnpj, razao_social FROM clientes",
+                target_table="clientes",
+                mode="replace",
+            )
+        ],
+        rationale="prep",
+    )
+    cfg.tables[0].duckdb = DuckDBConfig(enabled=True, force_analytical=True, fetch_limit=1000)
+    from txt2sql.sufficiency import SufficiencyDecision
+
+    monkeypatch.setattr(
+        "txt2sql.graph.build_llm",
+        lambda config: ScriptedLLM([ready, mat_plan]),
+    )
+    monkeypatch.setattr(
+        "txt2sql.analytical_planning.build_deterministic_mat_plan",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        "txt2sql.analytical_planning.run_sufficiency_gate",
+        lambda **_kw: SufficiencyDecision(action="refresh", reasons=["test"]),
+    )
+    agent = build_agent(cfg, checkpointer=MemorySaver())
+    result = agent.invoke(
+        {"messages": [HumanMessage(content="exporte em csv")]},
+        config={"configurable": {"thread_id": "export-disabled"}},
+    )
+    answer = (result.get("final_answer") or "").lower()
+    assert "não está habilitada" in answer
+    assert result.get("export_url") is None
 
 
 def test_answer_fallback_when_llm_claims_failure_despite_ok_result(monkeypatch: Any) -> None:

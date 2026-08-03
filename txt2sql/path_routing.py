@@ -30,6 +30,8 @@ def route_execution(
     shard_routing: ShardRouting,
     config: AgentConfig,
 ) -> ExecutionPath:
+    if getattr(intent_plan, "wants_export", False):
+        return "analytical"
     if shard_routing.mode == "multi":
         return "analytical"
     touched = _touched_table_ids(intent_plan)

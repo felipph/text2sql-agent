@@ -64,6 +64,10 @@ class Txt2SqlPromptBuilder:
             "- entities: faça grounding das menções do usuário (role table|column|value).",
             "- filters/metrics/joins/group_by/order_by: use só table_id/column_id válidos.",
             "- question_rewrite: reformule a pergunta desambiguada em PT-BR.",
+            (
+                "- wants_export=true quando o usuário pedir exportar/baixar CSV/planilha/"
+                "lista completa dos dados brutos (não a tabela resumida da resposta)."
+            ),
         ]
         sharded = self._config.sharded_tables
         if sharded:
@@ -123,6 +127,9 @@ class Txt2SqlPromptBuilder:
             self._section_column_semantics(schema_loader),
             "\n".join(rules),
         ]
+        extra = (self._config.prompts.intent_extra or "").strip()
+        if extra:
+            sections.append(f"## Instruções adicionais (intent)\n{extra}")
         return "\n\n".join(s for s in sections if s)
 
     # ------------------------------------------------------------------ #
@@ -167,20 +174,17 @@ class Txt2SqlPromptBuilder:
     # Seção 3 — Regras gerais
     # ------------------------------------------------------------------ #
     def _section_general_rules(self) -> str:
-        # return (
-        #     "## 3. Regras gerais (OBRIGATÓRIAS)\n"
-        #     "- SOMENTE consultas de leitura (`SELECT`). NUNCA gere `INSERT`, `UPDATE`, "
-        #     "`DELETE`, `DROP`, `CREATE`, `ALTER`, `TRUNCATE`, `MERGE`, `EXEC` ou DDL/DML "
-        #     "de qualquer tipo — o guardrail rejeitará e a query falhará.\n"
-        #     "- NUNCA use `SELECT *`. Liste explicitamente apenas as colunas necessárias.\n"
-        #     f"- Limite os resultados a no máximo {self._config.top_k} linhas, a menos que "
-        #     "o usuário peça explicitamente mais.\n"
-        #     "- Sempre qualifique as colunas quando houver mais de uma tabela envolvida.\n"
-        #     "- Se a query falhar, leia a mensagem de erro, corrija e tente novamente."
-        # )
         return (
             "## 3. Regras gerais (OBRIGATÓRIAS)\n"
-            "- Você pode executar qualquer tipo de SQL incluindo DML e DDL e consulta o banco de dados como quiser."
+            "- SOMENTE consultas de leitura (`SELECT`). NUNCA gere `INSERT`, `UPDATE`, "
+            "`DELETE`, `DROP`, `CREATE`, `ALTER`, `TRUNCATE`, `MERGE`, `EXEC` ou DDL/DML "
+            "de qualquer tipo — o guardrail rejeitará e a query falhará.\n"
+            "- NUNCA use `SELECT *`. Liste explicitamente apenas as colunas necessárias.\n"
+            f"- Prefira resultados enxutos; o sample apresentado ao usuário limita-se a "
+            f"cerca de {self._config.sample_rows} linhas "
+            f"(teto técnico de linhas na query: {self._config.query_max_rows}).\n"
+            "- Sempre qualifique as colunas quando houver mais de uma tabela envolvida.\n"
+            "- Se a query falhar, leia a mensagem de erro, corrija e tente novamente."
         )
 
 
@@ -189,8 +193,7 @@ class Txt2SqlPromptBuilder:
     # ------------------------------------------------------------------ #
     def _section_pagination(self) -> str:
         return (
-            "## 4. Protocolo de paginação\n"
-            f"- Você pode executar no máximo **{self._config.max_pages} consultas** por turno.\n"
+            "## 4. Protocolo de consultas\n"
             "- Planeje suas queries: descubra o schema necessário, depois consulte os dados.\n"
             "- Não desperdice consultas com tentativas exploratórias desnecessárias.\n"
             "- Quando tiver dados suficientes para responder, PARE de consultar e responda."

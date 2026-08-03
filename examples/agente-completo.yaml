@@ -1,0 +1,304 @@
+# =============================================================================
+# Referência completa de configuração do agente txt2sql
+# =============================================================================
+#
+# Carrega com:
+#   from txt2sql import load_config
+#   config = load_config("examples/agente-completo.yaml")
+#
+# Precedência de connection string por banco:
+#   1) override_connections={id: url} passado a load_config(...)
+#   2) connection_string no YAML
+#   3) valor da env var nomeada em connection_env
+#
+# NÃO entra neste YAML (são parâmetros de código / estado em runtime):
+#   - checkpointer em build_agent(..., checkpointer=...)
+#   - Budget (max_clarifications etc.) — defaults internos do grafo
+#   - prompts extras do playground (arquivo separado da app hospedeira)
+#
+# Valores abaixo são ilustrativos. Ajuste IDs, resolvers e URLs ao seu domínio.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# dialect (raiz)
+# -----------------------------------------------------------------------------
+# Dialeto SQL informado ao LLM e ao guardrail (ex.: postgres, mssql, sqlite,
+# mysql). Afeta geração/validação de SQL. Opcional; se omitido, o comportamento
+# depende do dialeto inferido das connections.
+dialect: postgres
+
+# -----------------------------------------------------------------------------
+# databases[]
+# -----------------------------------------------------------------------------
+# Lista de engines SQLAlchemy disponíveis. Todo tables[].database deve
+# referenciar um id desta lista.
+databases:
+  # Banco de referência / cadastro (não shardado).
+  - id: db_main
+    # connection_string: URL SQLAlchemy explícita (alternativa a connection_env).
+    # Ex.: "postgresql+psycopg://user:pass@host:5432/db"
+    # connection_string: "sqlite:////tmp/main.db"
+
+    # Nome da variável de ambiente com a connection string.
+    # Obrigatório ter connection_string OU connection_env (ou override em código).
+    connection_env: MAIN_DB_URL
+
+    # Se true, o engine é tratado como somente-leitura (guardrail fail-closed).
+    # Default: true
+    read_only: true
+
+    # Timeout de *conexão* (segundos) ao abrir o engine.
+    # Default: 10
+    connect_timeout: 10
+
+    # Timeout de *execução* de SELECT neste banco (segundos).
+    # null/omitido → herda agent.query_timeout.
+    # 0 → desliga o deadline só neste banco.
+    query_timeout: 30
+
+  # Shard físico 1 (ex.: CNPJs cujo hash cai neste nó).
+  - id: db_shard_1
+    connection_env: SHARD_1_DB_URL
+    read_only: true
+    connect_timeout: 10
+    # Exemplo: shard mais lento — timeout maior só aqui.
+    query_timeout: 60
+
+  - id: db_shard_2
+    connection_env: SHARD_2_DB_URL
+    read_only: true
+    connect_timeout: 10
+
+# -----------------------------------------------------------------------------
+# tables[]
+# -----------------------------------------------------------------------------
+# Tabelas *lógicas* conhecidas pelo agente. O id é o que o IntentPlan usa;
+# name/schema são o alvo físico (após sharding, name pode mudar via resolver).
+tables:
+  # --- Tabela sem shards, schema por discovery (sem columns) ----------------
+  - id: clientes
+    # ID do databases[] usado como referência (discovery / fallback).
+    database: db_main
+
+    # Schema/namespace no SGBD (opcional; ex.: public, dbo).
+    schema: public
+
+    # Nome físico da tabela no banco de referência.
+    name: clientes
+
+    # Texto negocial injetado no system prompt / schema para o LLM.
+    description: >-
+      Cadastro de clientes (PJ) com CNPJ e razão social. Não shardada;
+      vive no banco principal.
+
+    # sample_rows: quantas linhas de amostra incluir no schema para o LLM.
+    # Default: 3.
+    sample_rows: 3
+
+    # Sem `columns` → discovery via reflection no database de referência.
+    # Com `columns` → schema declarativo (não consulta information_schema).
+
+    # duckdb opcional também em tabelas não shardadas (ex.: JOIN com shardadas).
+    duckdb:
+      # Se true, a tabela pode ser materializada no DuckDB da sessão.
+      enabled: true
+
+      # Gatilho semântico / legado de materialização. Valores válidos:
+      #   always       → força force_analytical=true (path analytical obrigatório)
+      #   aggregation  → default; agregações tendem ao path analytical
+      #   order        → ORDER BY pesado
+      #   join         → JOINs envolvendo a tabela
+      # No dual-path atual, agregação/group_by em tabela com duckdb.enabled
+      # também roteia para analytical.
+      trigger: join
+
+      # Máximo de linhas puxadas da origem ao materializar (lotes; sem fetchall).
+      # Default: 100000
+      fetch_limit: 100000
+
+      # Se true, obriga extract → DuckDB → análise (Policy Gate rejeita agg na origem).
+      # Default: false. trigger: always também força este flag.
+      force_analytical: false
+
+  # --- Tabela shardada + schema declarativo + DuckDB -----------------------
+  - id: recebiveis
+    database: db_main
+    schema: public
+    name: recebiveis
+    description: >-
+      Títulos a receber. Fisicamente particionada por CNPJ em shards;
+      volumétrica — agregações passam pelo DuckDB.
+    sample_rows: 3
+
+    sharding:
+      # Coluna cujo valor determina o shard (deve aparecer em IntentPlan.filters
+      # como eq/in, ou ser resolvida via lookup / value_extractor).
+      discriminator_column: cnpj
+
+      # Callable dotted: modulo.sub:funcao → (valor: str) -> ShardResult
+      # ShardResult(database_id, table_name) com nome físico real.
+      resolver: "examples.shard_resolver_example:resolve_cnpj_shard"
+
+      # Opcional. Callable (text: str) -> list[str] — fallback textual quando o
+      # IntentPlan omite o discriminador em filters. Domínio fica no app.
+      value_extractor: "examples.shard_resolver_example:extract_cnpj_values"
+
+    # Schema declarativo: cada coluna pode orientar o LLM.
+    columns:
+      - name: cnpj
+        # Tipo SQL informativo (não valida no banco).
+        type: VARCHAR
+        description: "CNPJ do titular (14 dígitos, sem formatação)."
+      - name: valor
+        type: NUMERIC
+        description: "Valor bruto do título em BRL."
+      - name: data_vencimento
+        type: DATE
+        description: "Data de vencimento (YYYY-MM-DD)."
+      - name: status
+        type: VARCHAR
+        description: "Status do título (pago, pendente, vencido, cancelado)."
+
+    duckdb:
+      enabled: true
+      # always ≡ force_analytical true: toda consulta desta tabela vai ao analytical.
+      trigger: always
+      fetch_limit: 500000
+      force_analytical: true
+
+# -----------------------------------------------------------------------------
+# relationships[]
+# -----------------------------------------------------------------------------
+# FKs lógicas entre tabelas (contexto para JOIN / lookup de discriminador).
+# from/to usam o id lógico da tabela (tables[].id), não o nome físico.
+relationships:
+  - from:
+      table: recebiveis
+      column: cnpj
+      # schema: opcional na ref (raramente necessário se tables[].schema basta)
+      # schema: public
+    to:
+      table: clientes
+      column: cnpj
+    description: "Cada recebível pertence a um cliente identificado pelo CNPJ."
+
+# -----------------------------------------------------------------------------
+# glossary[]
+# -----------------------------------------------------------------------------
+# Termos de negócio injetados no prompt para desambiguar vocabulário do usuário.
+glossary:
+  - term: "título"
+    definition: "Sinônimo de recebível / duplicata a receber."
+  - term: "inadimplente"
+    definition: "Cliente com pelo menos um título vencido e não pago."
+
+# -----------------------------------------------------------------------------
+# agent
+# -----------------------------------------------------------------------------
+# Parâmetros operacionais do grafo / compactação de resultados.
+agent:
+  # Linhas no sample de ExecutionResult (compact_result). Default: 20
+  sample_rows: 50
+
+  # LIMIT injetado pelo Policy Gate se a SQL não tiver LIMIT. Default: 500000
+  query_max_rows: 500000
+
+  # Retries de IntentPlan antes de clarificar. Default: 2
+  max_intent_retries: 2
+
+  # Truncamento de strings longas em amostras de schema (caracteres). Default: 5000
+  max_string_length: 10000
+
+  # Flag global de somente-leitura (complementa databases[].read_only). Default: true
+  read_only: true
+
+  # Máximo de shards físicos distintos no fan-in / resolve_routing. Default: 20
+  max_shards: 20
+
+  # Timeout default de execução SELECT OLTP (segundos). 0 desliga. Default: 30
+  query_timeout: 30
+
+  budget:
+    max_clarifications: 2
+    max_refine: 3
+    max_mat_loops: 3
+    max_gate_visits: 2
+    max_rows_per_extract: 500000
+    max_rows_materialized: 2000000
+
+  # Heurística textual de export (omitir = defaults da lib; [] = só IntentPlan.wants_export)
+  # export_detect_keywords:
+  #   - exportar
+  #   - csv
+
+  messages:
+    # clarification_exhausted: "..."
+    # export_disabled: "..."
+    # export_no_data: "..."
+    # export_failed: "..."
+    # export_download_hint: "Você pode baixar a lista completa aqui: {url}"
+    # export_truncated: "... {discriminator} ..."
+    # partial_coverage: "... {discriminator} ..."
+    # answer_fallback_header: "Resultado da consulta:"
+
+  prompts:
+    # intent_extra: "Regras extras só no interpret_intent"
+    # answer_rules: "Substitui o bloco de regras do nó answer se não vazio"
+    intent_extra: ""
+    answer_rules: ""
+
+  export:
+    enabled: false
+    dir: /var/txt2sql/exports
+    base_url: https://app.example/exports
+    ttl_seconds: 86400
+    delimiter: ";"
+    max_rows: 500000
+
+# -----------------------------------------------------------------------------
+# analytics
+# -----------------------------------------------------------------------------
+analytics:
+  # TTL (segundos) para reuse do catálogo DuckDB. Default: 1800. 0 desliga checagem.
+  reuse_ttl_seconds: 1800
+  # fetchmany na materialização. Default: 5000
+  batch_size: 5000
+  # LIMIT do sample pós-materialize. Default: 5
+  materialize_sample_rows: 5
+
+# -----------------------------------------------------------------------------
+# llm
+# -----------------------------------------------------------------------------
+# Azure OpenAI. Campos omitidos caem nas env vars AZURE_OPENAI_* (obrigatórias
+# se o bloco estiver incompleto). Preferível não colocar api_key no YAML.
+llm:
+  # Nome do deployment no Azure (ex.: gpt-4o). Env: AZURE_OPENAI_DEPLOYMENT
+  deployment: gpt-4o
+
+  # Alias/modelo lógico opcional (alguns clients usam além do deployment).
+  model: null
+
+  # Versão da API Azure. Env relacionada: AZURE_OPENAI_API_VERSION
+  api_version: "2024-12-01-preview"
+
+  # Endpoint do recurso Azure. Env: AZURE_OPENAI_ENDPOINT
+  # azure_endpoint: "https://SEU_RECURSO.openai.azure.com/"
+
+  # Chave da API. Prefira AZURE_OPENAI_API_KEY no ambiente — não commitar segredo.
+  # api_key: "..."
+
+  # Temperatura do LLM. Default: 0.0 (determinístico para SQL/planos).
+  temperature: 0.0
+
+# -----------------------------------------------------------------------------
+# custom_section (raiz)
+# -----------------------------------------------------------------------------
+# Texto livre anexado ao final do system prompt SQL (regras de domínio do app).
+# Para regras do interpret_intent, use agent.prompts.intent_extra.
+custom_section: |
+  Regras deste ambiente de exemplo:
+  - recebiveis é SHARDADA por CNPJ; inclua o CNPJ em IntentPlan.filters (eq/in).
+  - Sem discriminador mas com escopo via clientes: o sistema pode fazer lookup.
+  - NUNCA faça fan-out cego sem lista de discriminadores.
+  - NUNCA JOIN cross-database entre clientes e recebiveis na origem;
+    use o path analytical (DuckDB) após materialização.

@@ -7,28 +7,33 @@ Como configurar um agente `txt2sql` para diferentes ambientes.
 1. **Arquivo YAML** — fonte principal (`load_config(path)`). Exemplos em `examples/`.
 2. **`override_connections`** — mapa `{database_id: connection_string}` passado a `load_config` (prioridade sobre YAML/env).
 3. **Env vars** — `connection_env` por banco + `AZURE_OPENAI_*` + `LANGFUSE_*`. Referência completa: [variáveis de ambiente](../referencia/variaveis-de-ambiente.md).
-4. **`build_agent(..., dual_path=True)`** — parâmetro de código (não YAML). `True` (padrão) = grafo dual-path; `False` = ReAct legado. Ver [API](../referencia/api.md).
+4. **`build_agent(..., checkpointer=...)`** — checkpointer é parâmetro de código (não YAML). HITL exige checkpointer.
 
 ## Blocos do YAML
 
 | Bloco | Função |
 |-------|--------|
 | `dialect` | Dialeto SQL (prompt + guardrail) |
-| `databases[]` | Engines (`connection_string` ou `connection_env`, `read_only`, `query_timeout` opcional) |
+| `databases[]` | Engines (`connection_string` ou `connection_env`, `read_only`, `connect_timeout`, `query_timeout` opcional) |
 | `tables[]` | Tabelas lógicas; `columns` → declarativo; ausente → discovery |
 | `tables[].description` | Texto negocial da tabela (prompt + schema); opcional |
-| `tables[].sharding` | `discriminator_column` + `resolver` dotted |
+| `tables[].sharding` | `discriminator_column` + `resolver` (+ `value_extractor` opcional) |
 | `tables[].duckdb` | `enabled`, `trigger`, `fetch_limit`, `force_analytical` |
 | `relationships[]` / `glossary[]` | Contexto semântico no prompt |
-| `agent` | `top_k`, `max_pages`, `max_string_length`, `read_only`, `query_timeout` (default 30; `0` desliga) |
+| `agent` | `sample_rows`, `query_max_rows`, `max_intent_retries`, `max_string_length`, `read_only`, `max_shards`, `query_timeout`, `budget`, `messages`, `prompts`, `export`, `export_detect_keywords` |
+| `analytics` | `reuse_ttl_seconds`, `batch_size`, `materialize_sample_rows` |
 | `llm` | Azure OpenAI (opcional se env vars completas) |
-| `custom_section` | Texto livre no system prompt |
+| `custom_section` | Texto livre no system prompt SQL (não no intent; use `agent.prompts.intent_extra`) |
+
+**Removidos (fail-closed):** `agent.top_k`, `agent.max_pages`, `agent.sample_rows_in_table_info` — ver substitutos na mensagem de `ValueError`.
+
+Referência anotada com **todos** os campos: [`examples/agente-completo.yaml`](../../examples/agente-completo.yaml).
 
 ### DuckDB: `force_analytical` e `trigger`
 
 * `force_analytical: true` — obriga extract → DuckDB → análise (path *analytical* no dual-path; Policy Gate rejeita agg pesada na origem).
 * `trigger: always` — alias que força `force_analytical=True` no parse do YAML.
-* Demais triggers (`aggregation`, `order`, `join`) — no dual-path, agregação/`group_by` em tabela com `duckdb.enabled` também roteia para *analytical*; no ReAct, o trigger casa com a SQL da tool.
+* Demais triggers (`aggregation`, `order`, `join`) — no dual-path, agregação/`group_by` em tabela com `duckdb.enabled` também roteia para *analytical*.
 
 ## Por ambiente
 
@@ -38,6 +43,7 @@ Como configurar um agente `txt2sql` para diferentes ambientes.
 
 ## Exemplos
 
+* **Referência completa (todos os campos anotados):** `examples/agente-completo.yaml`
 * Multi-banco + shard + DuckDB: `examples/recebiveis.yaml`
 * Discovery MSSQL: `examples/diario.yaml`
 * Resolver: `examples/shard_resolver_example.py`

@@ -39,6 +39,8 @@ from txt2sql.answer_grounding import (
     build_partial_user_notice,
     filter_messages_for_answer,
     format_answer_from_sample,
+    format_ux_message,
+    resolve_discriminator_label,
     strip_provenance_from_answer,
 )
 from txt2sql.artifacts import (
@@ -57,6 +59,11 @@ from txt2sql.db.materialize import materialize_tables
 from txt2sql.db.registry import DatabaseRegistry, QueryTimeoutError
 from txt2sql.db.schema import SchemaLoader
 from txt2sql.db.session_store import DuckDBSessionStore
+from txt2sql.export_csv import (
+    build_denormalized_select,
+    detect_wants_export,
+    export_denormalized_csv,
+)
 from txt2sql.intent import Clarification, IntentPlan, validate_intent
 from txt2sql.llm import build_llm
 from txt2sql.middleware import compact_result, result_from_rejection, result_from_timeout
@@ -71,11 +78,19 @@ from txt2sql.shard_routing import (
 )
 from txt2sql.sufficiency import SufficiencyDecision, intent_table_ids
 
-MAX_INTENT_RETRIES = 2
-CLARIFICATION_EXHAUSTED = (
-    "Não consegui obter esclarecimentos suficientes para continuar. "
-    "Reformule a pergunta com todos os detalhes necessários numa única mensagem."
-)
+
+def _apply_wants_export(
+    plan: IntentPlan,
+    state: dict[str, Any],
+    *,
+    keywords: list[str] | None,
+) -> tuple[IntentPlan, bool]:
+    wants = bool(plan.wants_export) or detect_wants_export(
+        _last_human_text(state), keywords=keywords
+    )
+    if wants and not plan.wants_export:
+        plan = plan.model_copy(update={"wants_export": True})
+    return plan, wants
 
 
 class GraphState(MessagesState):
@@ -99,6 +114,9 @@ class GraphState(MessagesState):
     partial: bool
     final_answer: str | None
     answer_provenance: AnswerProvenance | None
+    wants_export: bool
+    export_url: str | None
+    export_result: dict[str, Any] | None
     duckdb_session: Annotated[DuckDBSession | None, UntrackedValue]
 
 
@@ -240,6 +258,14 @@ def build_graph(
     intent_prompt = prompt_builder.build_intent_prompt(schema_loader=schema_loader)
     logger.debug(f"Intent prompt: {intent_prompt}")
     has_checkpointer = checkpointer is not None
+    msgs = agent_config.messages
+    clarification_exhausted = msgs.clarification_exhausted
+    export_disabled = msgs.export_disabled
+    export_no_data = msgs.export_no_data
+    export_failed = msgs.export_failed
+    max_intent_retries = agent_config.max_intent_retries
+    export_keywords = agent_config.export_detect_keywords
+    bc = agent_config.budget
 
     if session_store is None:
         session_store = DuckDBSessionStore(Path(tempfile.mkdtemp(prefix="txt2sql_duckdb_")))
@@ -283,7 +309,13 @@ def build_graph(
         budget = Budget(
             total_rows_materialized=prev_budget.total_rows_materialized,
             clarification_count=0,
-            max_clarifications=prev_budget.max_clarifications,
+            max_clarifications=bc.max_clarifications,
+            max_refine=bc.max_refine,
+            max_mat_loops=bc.max_mat_loops,
+            max_gate_visits=bc.max_gate_visits,
+            max_rows_per_extract=bc.max_rows_per_extract,
+            max_rows_materialized=bc.max_rows_materialized,
+            sample_rows=agent_config.sample_rows,
         )
 
         return {
@@ -305,6 +337,9 @@ def build_graph(
             "partial": False,
             "final_answer": None,
             "answer_provenance": None,
+            "wants_export": False,
+            "export_url": None,
+            "export_result": None,
             "duckdb_session": session,
         }
 
@@ -349,8 +384,8 @@ def build_graph(
                 return {
                     "intent_plan": plan,
                     "intent_route": "finish",
-                    "final_answer": CLARIFICATION_EXHAUSTED,
-                    "messages": [AIMessage(content=CLARIFICATION_EXHAUSTED)],
+                    "final_answer": clarification_exhausted,
+                    "messages": [AIMessage(content=clarification_exhausted)],
                 }
             return {
                 "intent_plan": plan,
@@ -361,7 +396,7 @@ def build_graph(
         if not validation.ok:
             retries = int(state.get("intent_retries", 0)) + 1
             errors_txt = "; ".join(validation.errors) or (parse_error or "plan inválido")
-            if retries >= MAX_INTENT_RETRIES:
+            if retries >= max_intent_retries:
                 clarify = IntentPlan(
                     status="needs_clarification",
                     question_rewrite=plan.question_rewrite,
@@ -399,12 +434,14 @@ def build_graph(
             from txt2sql.discriminator_lookup import find_lookup_source
 
             if find_lookup_source(plan, config) is not None:
+                plan, wants_export = _apply_wants_export(plan, state, keywords=export_keywords)
                 return {
                     "intent_plan": plan,
                     "intent_route": "resolve_and_route",
+                    "wants_export": wants_export,
                 }
             retries = int(state.get("intent_retries", 0)) + 1
-            if retries < MAX_INTENT_RETRIES:
+            if retries < max_intent_retries:
                 feedback = SystemMessage(
                     content=(
                         "O IntentPlan está ready mas falta o discriminador de shard "
@@ -419,9 +456,11 @@ def build_graph(
                 }
             # retries esgotados → resolve_and_route (value_extractor / ClarifyNeeded / lookup)
 
+        plan, wants_export = _apply_wants_export(plan, state, keywords=export_keywords)
         return {
             "intent_plan": plan,
             "intent_route": "resolve_and_route",
+            "wants_export": wants_export,
         }
 
     def ask_clarification(state: GraphState, config: RunnableConfig) -> dict[str, Any]:
@@ -439,8 +478,8 @@ def build_graph(
         if budget.exhausted("clarification_count"):
             return {
                 "intent_route": "finish",
-                "final_answer": CLARIFICATION_EXHAUSTED,
-                "messages": [AIMessage(content=CLARIFICATION_EXHAUSTED)],
+                "final_answer": clarification_exhausted,
+                "messages": [AIMessage(content=clarification_exhausted)],
             }
 
         budget = budget.model_copy(update={"clarification_count": budget.clarification_count + 1})
@@ -477,7 +516,7 @@ def build_graph(
 
     def finish(state: GraphState) -> dict[str, Any]:
         """Encerra com ``final_answer`` já definido (ex.: clarificação esgotada)."""
-        text = state.get("final_answer") or CLARIFICATION_EXHAUSTED
+        text = state.get("final_answer") or clarification_exhausted
         return {"final_answer": text, "messages": [AIMessage(content=text)]}
 
     def resolve_and_route(state: GraphState) -> dict[str, Any]:
@@ -525,8 +564,8 @@ def build_graph(
                         return {
                             "intent_plan": clarify,
                             "intent_route": "finish",
-                            "final_answer": CLARIFICATION_EXHAUSTED,
-                            "messages": [AIMessage(content=CLARIFICATION_EXHAUSTED)],
+                            "final_answer": clarification_exhausted,
+                            "messages": [AIMessage(content=clarification_exhausted)],
                         }
                     return {
                         "intent_plan": clarify,
@@ -562,8 +601,8 @@ def build_graph(
                     return {
                         "intent_plan": clarify,
                         "intent_route": "finish",
-                        "final_answer": CLARIFICATION_EXHAUSTED,
-                        "messages": [AIMessage(content=CLARIFICATION_EXHAUSTED)],
+                        "final_answer": clarification_exhausted,
+                        "messages": [AIMessage(content=clarification_exhausted)],
                     }
                 return {
                     "intent_plan": clarify,
@@ -619,6 +658,7 @@ def build_graph(
             path="simple",
             context="query",
             dialect=default_dialect,
+            max_rows=agent_config.query_max_rows,
         )
         if decision.status == "rejected":
             return {"last_result": result_from_rejection(decision.error or "rejeitado")}
@@ -753,7 +793,24 @@ def build_graph(
                 "last_result": payload,
             }
 
-        mat_budget = budget.model_copy(update={"mat_loop_count": budget.mat_loop_count + 1})
+        rows_now = sum(int(t.row_count or 0) for t in outcome.catalog.tables)
+        mat_budget = budget.model_copy(
+            update={
+                "mat_loop_count": budget.mat_loop_count + 1,
+                "total_rows_materialized": rows_now,
+            }
+        )
+        if mat_budget.exhausted("total_rows_materialized"):
+            msg = (
+                "Limite de linhas materializadas na sessão foi atingido. "
+                "Refine o recorte da pergunta ou aumente agent.budget.max_rows_materialized."
+            )
+            return {
+                "duckdb_session": session,
+                "duckdb_catalog": outcome.catalog,
+                "budget": mat_budget,
+                "last_result": ExecutionResult(status="error", error=msg),
+            }
         result = _compact_from_state(state, outcome.sample_rows, mat_budget, session=session)
         return {
             "duckdb_session": session,
@@ -843,6 +900,7 @@ def build_graph(
             context="query",
             dialect="duckdb",
             duckdb_catalog=_catalog(state),
+            max_rows=agent_config.query_max_rows,
         )
         if decision.status == "rejected":
             return {
@@ -921,19 +979,43 @@ def build_graph(
         partial = bool(state.get("partial", False))
         assumptions = list(plan.assumptions or [])
         shard = _shard_routing(state)
+
+        # Mensagens terminais já montadas pelo export (desabilitado / sem dados / erro)
+        preexisting = state.get("final_answer")
+        if (
+            preexisting
+            and not state.get("export_url")
+            and (
+                (last is not None and last.status == "error")
+                or bool(state.get("wants_export"))
+            )
+        ):
+            provenance = build_answer_provenance(
+                sql_history=sql_history,
+                assumptions=assumptions,
+                partial=partial,
+                last_result=last,
+            )
+            return {
+                "final_answer": preexisting,
+                "answer_provenance": provenance,
+                "messages": [AIMessage(content=str(preexisting))],
+            }
+
         clean_messages = filter_messages_for_answer(list(state.get("messages") or []))
+        disc = resolve_discriminator_label(agent_config, plan)
         partial_notice = build_partial_user_notice(
             assumptions=assumptions,
             partial=partial,
             max_shards=agent_config.max_shards,
             shard_routing=shard,
+            discriminator=disc,
+            suggestion_template=msgs.partial_coverage,
         )
-        context = (
-            "Responda ao usuário em PT-BR com base no IntentPlan e last_result.\n"
-            "REGRAS OBRIGATÓRIAS:\n"
+        default_answer_rules = (
             "- Se last_result.status for 'ok' e houver sample/linhas, você DEVE "
             "apresentar esses dados (preferencialmente em tabela markdown). "
-            "NUNCA diga que a consulta falhou, que faltou discriminador/CNPJ, "
+            "NUNCA diga que a consulta falhou, que faltou discriminador, "
             "ou que não foi possível executar — isso já foi resolvido pelo sistema.\n"
             "- NÃO inclua bloco de proveniência, SQL executado, assunções técnicas "
             "nem rodapé com '---'. Essa informação fica só no sistema.\n"
@@ -941,6 +1023,14 @@ def build_graph(
             "- NÃO mencione nomes de parâmetros internos (max_shards, filters, "
             "IntentPlan, etc.).\n"
         )
+        answer_rules = (agent_config.prompts.answer_rules or "").strip() or default_answer_rules
+        context = (
+            "Responda ao usuário em PT-BR com base no IntentPlan e last_result.\n"
+            "REGRAS OBRIGATÓRIAS:\n"
+            f"{answer_rules}"
+        )
+        if not context.endswith("\n"):
+            context += "\n"
         if partial_notice:
             context += (
                 "- A resposta é INCOMPLETA. Ao final da resposta (após os dados), "
@@ -967,9 +1057,23 @@ def build_graph(
                 assumptions=assumptions,
                 max_shards=agent_config.max_shards,
                 shard_routing=shard,
+                discriminator=disc,
+                suggestion_template=msgs.partial_coverage,
+                header=msgs.answer_fallback_header,
             )
         elif partial_notice and "incompleta" not in text.lower():
             text = text.rstrip() + "\n\n" + partial_notice
+
+        export_url = state.get("export_url")
+        export_meta = state.get("export_result") or {}
+        if export_url:
+            if export_url not in text:
+                hint = format_ux_message(msgs.export_download_hint, url=export_url)
+                text = text.rstrip() + "\n\n" + hint
+            if export_meta.get("truncated") and "incompleta" not in text.lower():
+                trunc = format_ux_message(msgs.export_truncated, discriminator=disc)
+                text = text.rstrip() + "\n\n" + trunc
+
         provenance = build_answer_provenance(
             sql_history=sql_history,
             assumptions=assumptions,
@@ -980,6 +1084,79 @@ def build_graph(
             "final_answer": text,
             "answer_provenance": provenance,
             "messages": [AIMessage(content=text)],
+        }
+
+    def export_csv(state: GraphState, config: RunnableConfig) -> dict[str, Any]:
+        """Gera CSV denormalizado via COPY streaming e preenche export_url."""
+        if not agent_config.export.enabled:
+            return {
+                "export_url": None,
+                "export_result": None,
+                "final_answer": export_disabled,
+                "messages": [AIMessage(content=export_disabled)],
+                "last_result": ExecutionResult(status="error", error=export_disabled),
+            }
+
+        session = _ensure_duckdb_session(state, config)
+        catalog = _catalog(state)
+        available = {t.name for t in catalog.tables}
+        plan = _coerce_intent_plan(state.get("intent_plan"))
+
+        if not available:
+            return {
+                "export_url": None,
+                "export_result": None,
+                "final_answer": export_no_data,
+                "messages": [AIMessage(content=export_no_data)],
+                "last_result": ExecutionResult(status="error", error=export_no_data),
+            }
+
+        try:
+            select_sql = build_denormalized_select(
+                plan, agent_config, available_tables=available
+            )
+            thread_id = _thread_id(config)
+            result = export_denormalized_csv(
+                session=session,
+                select_sql=select_sql,
+                config=agent_config.export,
+                thread_id=thread_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Falha no export CSV")
+            msg = export_failed
+            return {
+                "export_url": None,
+                "export_result": None,
+                "final_answer": msg,
+                "messages": [AIMessage(content=msg)],
+                "last_result": ExecutionResult(status="error", error=str(exc)),
+            }
+
+        meta = {
+            "path": str(result.path),
+            "url": result.url,
+            "row_count": result.row_count,
+            "truncated": result.truncated,
+            "filename": result.filename,
+        }
+        sample = [
+            {
+                "export_url": result.url,
+                "row_count": result.row_count,
+                "truncated": result.truncated,
+            }
+        ]
+        return {
+            "export_url": result.url,
+            "export_result": meta,
+            "duckdb_session": session,
+            "last_result": ExecutionResult(
+                status="ok",
+                row_count=result.row_count,
+                sample=sample,
+                truncated=result.truncated,
+            ),
         }
 
     # ------------------------------------------------------------------ #
@@ -1009,14 +1186,18 @@ def build_graph(
         return "interpret_intent" if has_checkpointer else END
 
     def route_after_gate(state: GraphState) -> str:
-        return (
-            "generate_analytical_sql"
-            if state.get("gate_action") == "reuse"
-            else "plan_materialization"
-        )
+        if state.get("gate_action") == "reuse":
+            if state.get("wants_export"):
+                return "export_csv"
+            return "generate_analytical_sql"
+        return "plan_materialization"
 
     def route_after_mat_check(state: GraphState) -> str:
-        return "generate_analytical_sql" if state.get("mat_ready") else "plan_materialization"
+        if state.get("mat_ready"):
+            if state.get("wants_export"):
+                return "export_csv"
+            return "generate_analytical_sql"
+        return "plan_materialization"
 
     def route_after_verify(state: GraphState) -> str:
         decision = _verify_decision(state)
@@ -1050,6 +1231,7 @@ def build_graph(
     graph.add_node("check_materialization", check_materialization)
     graph.add_node("generate_analytical_sql", generate_analytical_sql)
     graph.add_node("exec_duckdb", exec_duckdb)
+    graph.add_node("export_csv", export_csv)
 
     graph.add_edge(START, "init_state")
     graph.add_edge("init_state", "interpret_intent")
@@ -1074,17 +1256,18 @@ def build_graph(
     graph.add_conditional_edges(
         "sufficiency_gate",
         route_after_gate,
-        ["generate_analytical_sql", "plan_materialization"],
+        ["generate_analytical_sql", "plan_materialization", "export_csv"],
     )
     graph.add_edge("plan_materialization", "materialize")
     graph.add_conditional_edges(
         "check_materialization",
         route_after_mat_check,
-        ["generate_analytical_sql", "plan_materialization"],
+        ["generate_analytical_sql", "plan_materialization", "export_csv"],
     )
     graph.add_edge("materialize", "check_materialization")
     graph.add_edge("generate_analytical_sql", "exec_duckdb")
     graph.add_edge("exec_duckdb", "verify")
+    graph.add_edge("export_csv", "answer")
     graph.add_conditional_edges(
         "verify",
         route_after_verify,

@@ -99,6 +99,7 @@ class IntentPlan(BaseModel):
     limit: int | None = None
     clarification: Clarification | None = None
     assumptions: list[str] = Field(default_factory=list)
+    wants_export: bool = False
 
 
 class ValidationResult(BaseModel):

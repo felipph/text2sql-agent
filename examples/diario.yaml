@@ -5,8 +5,8 @@
 #     lógicos, referência a um `databases[].id` e `schema` explícito.
 #   * A conexão MSSQL, antes montada de MSSQL_* env vars, agora é declarada como
 #     um `databases[]` com `connection_env`.
-#   * `agent.*` (top_k, sample_rows, max_pages, max_string_length, read_only)
-#     mapeado 1:1 para o bloco `agent`.
+#   * `agent.*` (sample_rows, query_max_rows, max_string_length, read_only, budget, …)
+#     mapeado para o bloco `agent`.
 #   * `relationships` mantidos (agora referenciando os IDs lógicos das tabelas).
 #
 # Observação sobre `column_parsers`: no formato antigo, a coluna Texto passava
@@ -71,9 +71,8 @@ relationships:
     description: "Órgão responsável pela publicação"
 
 agent:
-  top_k: 20
-  sample_rows_in_table_info: 3
-  max_pages: 20
+  sample_rows: 20
+  query_max_rows: 500000
   max_string_length: 5000
   read_only: true
 

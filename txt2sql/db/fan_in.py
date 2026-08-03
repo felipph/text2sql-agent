@@ -40,6 +40,7 @@ def fan_in(
     table: TableConfig,
     registry: DatabaseRegistry,
     bindings: list[ShardBinding],
+    batch_size: int | None = None,
 ) -> FanInResult:
     """Materializa todos os físicos dos bindings no nome lógico da tabela.
 
@@ -108,6 +109,7 @@ def fan_in(
             filter_sql=filt,
             replace=first,
             append=not first,
+            batch_size=batch_size,
         )
         physical_tables.append(physical)
         first = False

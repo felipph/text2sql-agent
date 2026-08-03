@@ -15,14 +15,17 @@ API pública:
 from __future__ import annotations
 
 from txt2sql.agent import build_agent
-from txt2sql.config import AgentConfig, ShardResult, load_config
+from txt2sql.config import AgentConfig, ExportConfig, ShardResult, load_config
 from txt2sql.db.registry import QueryTimeoutError
+from txt2sql.export_csv import cleanup_expired_exports
 
 __all__ = [
     "AgentConfig",
+    "ExportConfig",
     "QueryTimeoutError",
     "ShardResult",
     "build_agent",
+    "cleanup_expired_exports",
     "load_config",
 ]
 

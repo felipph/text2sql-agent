@@ -66,6 +66,7 @@ class DuckDBSession:
         source_sql: str | None = None,
         append: bool = False,
         replace: bool = False,
+        batch_size: int | None = None,
     ) -> None:
         """Materializa as linhas brutas de uma tabela de origem no DuckDB.
 
@@ -121,18 +122,21 @@ class DuckDBSession:
         )
 
         total_rows = 0
+        chunk = int(batch_size) if batch_size is not None else BATCH_SIZE
+        if chunk < 1:
+            raise ValueError(f"batch_size deve ser >= 1, recebido: {chunk}")
         with source_engine.connect() as conn:
             logger.debug(f"Query No banco de origem: {select_sql}")
             result = conn.execute(text(select_sql))
             columns = list(result.keys())
-            first_batch = [tuple(r) for r in result.fetchmany(BATCH_SIZE)]
+            first_batch = [tuple(r) for r in result.fetchmany(chunk)]
 
             if already and append:
                 if first_batch:
                     self._insert_batch(logical_name, columns, first_batch)
                     total_rows += len(first_batch)
                     while True:
-                        batch = [tuple(r) for r in result.fetchmany(BATCH_SIZE)]
+                        batch = [tuple(r) for r in result.fetchmany(chunk)]
                         if not batch:
                             break
                         self._insert_batch(logical_name, columns, batch)
@@ -147,7 +151,7 @@ class DuckDBSession:
                 total_rows += len(first_batch)
 
                 while True:
-                    batch = [tuple(r) for r in result.fetchmany(BATCH_SIZE)]
+                    batch = [tuple(r) for r in result.fetchmany(chunk)]
                     if not batch:
                         break
                     self._insert_batch(logical_name, columns, batch)
@@ -273,6 +277,11 @@ class DuckDBSession:
         columns = [d[0] for d in cursor.description] if cursor.description else []
         rows = cursor.fetchall()
         return [dict(zip(columns, row)) for row in rows]
+
+    def execute_statement(self, sql: str) -> None:
+        """Executa statement sem materializar resultado em lista Python (ex.: COPY TO)."""
+        logger.debug("Executando statement no DuckDB: {}", sql)
+        self._conn.execute(sql)
 
     # ------------------------------------------------------------------ #
     # Ciclo de vida

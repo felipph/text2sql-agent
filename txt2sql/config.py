@@ -286,6 +286,126 @@ class GlossaryEntry:
 
 
 @dataclass
+class ExportConfig:
+    """Configuração de exportação CSV denormalizado.
+
+    Attributes:
+        enabled: Se ``True``, o grafo pode exportar CSV sob demanda.
+        dir: Diretório em disco para gravar os arquivos.
+        base_url: Prefixo HTTP para montar a URL de download (app serve os arquivos).
+        ttl_seconds: Idade máxima dos arquivos (cleanup via ``cleanup_expired_exports``).
+        delimiter: Separador de campos do CSV.
+        max_rows: Teto de linhas no dump (truncamento + aviso).
+    """
+
+    enabled: bool = False
+    dir: str = ""
+    base_url: str = ""
+    ttl_seconds: int = 86_400
+    delimiter: str = ","
+    max_rows: int = 500_000
+
+    def __post_init__(self) -> None:
+        if not self.enabled:
+            return
+        if not (self.dir or "").strip():
+            raise ValueError("export.dir é obrigatório quando export.enabled=true")
+        if not (self.base_url or "").strip():
+            raise ValueError("export.base_url é obrigatório quando export.enabled=true")
+        if self.ttl_seconds < 1:
+            raise ValueError(f"export.ttl_seconds deve ser >= 1, recebido: {self.ttl_seconds}")
+        if not (self.delimiter or "").strip():
+            raise ValueError("export.delimiter não pode ser vazio")
+        if self.max_rows < 1:
+            raise ValueError(f"export.max_rows deve ser >= 1, recebido: {self.max_rows}")
+
+
+@dataclass
+class BudgetConfig:
+    """Orçamentos do grafo (clarificação, refine, materialização, extracts)."""
+
+    max_clarifications: int = 2
+    max_refine: int = 3
+    max_mat_loops: int = 3
+    max_gate_visits: int = 2
+    max_rows_per_extract: int = 500_000
+    max_rows_materialized: int = 2_000_000
+
+    def __post_init__(self) -> None:
+        for name in (
+            "max_clarifications",
+            "max_refine",
+            "max_mat_loops",
+            "max_gate_visits",
+            "max_rows_per_extract",
+            "max_rows_materialized",
+        ):
+            value = int(getattr(self, name))
+            if value < 1:
+                raise ValueError(f"agent.budget.{name} deve ser >= 1, recebido: {value}")
+            setattr(self, name, value)
+
+
+@dataclass
+class MessagesConfig:
+    """Mensagens de UX configuráveis (defaults PT-BR genéricos)."""
+
+    clarification_exhausted: str = (
+        "Não consegui obter esclarecimentos suficientes para continuar. "
+        "Reformule a pergunta com todos os detalhes necessários numa única mensagem."
+    )
+    export_disabled: str = "A exportação em CSV não está habilitada neste ambiente."
+    export_no_data: str = (
+        "Ainda não há dados reunidos para exportar. "
+        "Faça primeiro a análise e, em seguida, peça o CSV da lista completa."
+    )
+    export_failed: str = (
+        "Não foi possível gerar o CSV neste momento. Tente de novo em seguida."
+    )
+    export_download_hint: str = "Você pode baixar a lista completa aqui: {url}"
+    export_truncated: str = (
+        "A lista exportada está incompleta porque há um limite de linhas por "
+        "exportação neste turno. Refine o recorte (valores de {discriminator}, "
+        "período ou filtros) para obter o máximo possível."
+    )
+    partial_coverage: str = (
+        "Para obter o máximo possível com essa limitação, refine a pergunta: "
+        "delimite um conjunto menor de valores de {discriminator}, um período "
+        "específico, ou peça um ranking top-N com recorte mais estreito."
+    )
+    answer_fallback_header: str = "Resultado da consulta:"
+
+
+@dataclass
+class PromptsConfig:
+    """Trechos extras de prompt (inline no YAML)."""
+
+    intent_extra: str = ""
+    answer_rules: str = ""
+
+
+DEFAULT_EXPORT_DETECT_KEYWORDS: tuple[str, ...] = (
+    "exportar",
+    "exporte",
+    "baixar csv",
+    "baixar planilha",
+    "download csv",
+    "gerar csv",
+    "em csv",
+    "para csv",
+    "lista completa",
+    "planilha",
+    ".csv",
+)
+
+_REMOVED_AGENT_KEYS = {
+    "top_k": "use agent.sample_rows (sample da resposta) e agent.query_max_rows (LIMIT do Policy Gate)",
+    "max_pages": "removido — o grafo dual-path não pagina; ajuste agent.budget.*",
+    "sample_rows_in_table_info": "use tables[].sample_rows",
+}
+
+
+@dataclass
 class LLMConfig:
     """Configuração do provider LLM (Azure OpenAI).
 
@@ -310,19 +430,24 @@ class AgentConfig:
         tables: Tabelas lógicas conhecidas pelo agente.
         relationships: Relacionamentos entre tabelas.
         glossary: Glossário de negócio.
-        top_k: Número default de linhas retornadas por query.
-        max_pages: Máximo de queries (páginas) executadas por turno.
-        max_string_length: Truncamento de strings longas em resultados.
+        sample_rows: Linhas no sample de ``ExecutionResult`` (compact_result).
+        query_max_rows: LIMIT injetado pelo Policy Gate quando a SQL não tem LIMIT.
+        max_intent_retries: Retries de IntentPlan antes de clarificar.
+        max_string_length: Truncamento de strings longas em amostras de schema.
         read_only: Flag global de somente-leitura.
-        sample_rows_in_table_info: Linhas de amostra no schema por default.
-        custom_section: Texto livre anexado ao final do system prompt.
+        custom_section: Texto livre anexado ao final do system prompt SQL.
         dialect: Dialeto SQL principal (informado ao LLM e ao guardrail).
-        max_shards: Máximo de shards físicos distintos ``(database_id, physical_table)``
-            no fan-in / ``resolve_routing``.
+        max_shards: Máximo de shards físicos distintos no fan-in / resolve_routing.
         query_timeout: Timeout default de execução SELECT (segundos); 0 desliga.
         reuse_ttl_seconds: TTL de reuse do catálogo DuckDB (segundos).
-            Default 1800 (30 min). ``0`` ou negativo desabilita a verificação.
+        batch_size: Tamanho do ``fetchmany`` na materialização DuckDB.
+        materialize_sample_rows: LIMIT do sample pós-materialize.
+        budget: Orçamentos do grafo.
+        messages: Mensagens de UX.
+        prompts: Trechos extras de prompt.
+        export_detect_keywords: Keywords de heurística de export (None = defaults).
         llm: Configuração do provider LLM.
+        export: Exportação CSV sob demanda (opcional).
         override_connections: Overrides de connection string aplicados na carga.
     """
 
@@ -331,18 +456,26 @@ class AgentConfig:
     relationships: list[RelationshipConfig] = field(default_factory=list)
     glossary: list[GlossaryEntry] = field(default_factory=list)
 
-    top_k: int = 20
-    max_pages: int = 10
+    sample_rows: int = 20
+    query_max_rows: int = 500_000
+    max_intent_retries: int = 2
     max_string_length: int = 5000
     read_only: bool = True
-    sample_rows_in_table_info: int = 3
     custom_section: str | None = None
     dialect: str | None = None
     max_shards: int = 20
     query_timeout: int = 30
     reuse_ttl_seconds: int = 1800
+    batch_size: int = 5_000
+    materialize_sample_rows: int = 5
+
+    budget: BudgetConfig = field(default_factory=BudgetConfig)
+    messages: MessagesConfig = field(default_factory=MessagesConfig)
+    prompts: PromptsConfig = field(default_factory=PromptsConfig)
+    export_detect_keywords: list[str] | None = None
 
     llm: LLMConfig = field(default_factory=LLMConfig)
+    export: ExportConfig = field(default_factory=ExportConfig)
     override_connections: dict[str, str] = field(default_factory=dict)
 
     # -- índices auxiliares -------------------------------------------------
@@ -353,6 +486,16 @@ class AgentConfig:
 
     def _validate(self) -> None:
         """Valida integridade referencial da configuração."""
+        for name in (
+            "sample_rows",
+            "query_max_rows",
+            "max_intent_retries",
+            "batch_size",
+            "materialize_sample_rows",
+        ):
+            value = int(getattr(self, name))
+            if value < 1:
+                raise ValueError(f"agent.{name} deve ser >= 1, recebido: {value}")
         if self.max_shards < 1:
             raise ValueError(
                 f"max_shards deve ser >= 1, recebido: {self.max_shards}"
@@ -456,6 +599,83 @@ def _parse_duckdb(raw: dict[str, Any] | None) -> DuckDBConfig | None:
     )
 
 
+def _parse_export_config(raw: dict[str, Any] | None) -> ExportConfig:
+    if not raw:
+        return ExportConfig()
+    return ExportConfig(
+        enabled=bool(raw.get("enabled", False)),
+        dir=str(raw.get("dir") or ""),
+        base_url=str(raw.get("base_url") or ""),
+        ttl_seconds=int(raw.get("ttl_seconds", 86_400)),
+        delimiter=str(raw.get("delimiter", ",")),
+        max_rows=int(raw.get("max_rows", 500_000)),
+    )
+
+
+def _reject_removed_agent_keys(agent_raw: dict[str, Any]) -> None:
+    found = [k for k in _REMOVED_AGENT_KEYS if k in agent_raw]
+    if not found:
+        return
+    hints = "; ".join(f"{k} → {_REMOVED_AGENT_KEYS[k]}" for k in found)
+    raise ValueError(
+        f"Campos removidos em agent: {', '.join(found)}. Substitutos: {hints}"
+    )
+
+
+def _parse_budget_config(raw: dict[str, Any] | None) -> BudgetConfig:
+    if not raw:
+        return BudgetConfig()
+    return BudgetConfig(
+        max_clarifications=int(raw.get("max_clarifications", 2)),
+        max_refine=int(raw.get("max_refine", 3)),
+        max_mat_loops=int(raw.get("max_mat_loops", 3)),
+        max_gate_visits=int(raw.get("max_gate_visits", 2)),
+        max_rows_per_extract=int(raw.get("max_rows_per_extract", 500_000)),
+        max_rows_materialized=int(raw.get("max_rows_materialized", 2_000_000)),
+    )
+
+
+def _parse_messages_config(raw: dict[str, Any] | None) -> MessagesConfig:
+    base = MessagesConfig()
+    if not raw:
+        return base
+    kwargs: dict[str, str] = {}
+    for field_name in (
+        "clarification_exhausted",
+        "export_disabled",
+        "export_no_data",
+        "export_failed",
+        "export_download_hint",
+        "export_truncated",
+        "partial_coverage",
+        "answer_fallback_header",
+    ):
+        value = raw.get(field_name)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            kwargs[field_name] = text
+    return MessagesConfig(**{**base.__dict__, **kwargs}) if kwargs else base
+
+
+def _parse_prompts_config(raw: dict[str, Any] | None) -> PromptsConfig:
+    if not raw:
+        return PromptsConfig()
+    return PromptsConfig(
+        intent_extra=str(raw.get("intent_extra") or ""),
+        answer_rules=str(raw.get("answer_rules") or ""),
+    )
+
+
+def _parse_export_detect_keywords(raw: Any) -> list[str] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        raise TypeError("agent.export_detect_keywords deve ser uma lista de strings")
+    return [str(x) for x in raw]
+
+
 def _parse_column_ref(raw: dict[str, Any]) -> ColumnRef:
     return ColumnRef(
         table=raw["table"],
@@ -539,14 +759,21 @@ def load_config(
     ]
 
     # agent params
-    agent_raw: dict[str, Any] = raw.get("agent", {})
+    agent_raw: dict[str, Any] = raw.get("agent", {}) or {}
+    if not isinstance(agent_raw, dict):
+        raise TypeError("agent deve ser um mapeamento YAML")
+    _reject_removed_agent_keys(agent_raw)
 
-    # analytics (TTL de reuse do catálogo DuckDB)
+    # analytics (TTL / batch / sample pós-mat)
     analytics_raw: dict[str, Any] = raw.get("analytics") or {}
+    if analytics_raw and not isinstance(analytics_raw, dict):
+        raise TypeError("analytics deve ser um mapeamento YAML")
     reuse_ttl_seconds = int(analytics_raw.get("reuse_ttl_seconds", 1800))
+    batch_size = int(analytics_raw.get("batch_size", 5_000))
+    materialize_sample_rows = int(analytics_raw.get("materialize_sample_rows", 5))
 
     # llm params
-    llm_raw: dict[str, Any] = raw.get("llm", {})
+    llm_raw: dict[str, Any] = raw.get("llm", {}) or {}
     llm = LLMConfig(
         deployment=llm_raw.get("deployment"),
         model=llm_raw.get("model"),
@@ -561,17 +788,34 @@ def load_config(
         tables=tables,
         relationships=relationships,
         glossary=glossary,
-        top_k=int(agent_raw.get("top_k", 20)),
-        max_pages=int(agent_raw.get("max_pages", 10)),
+        sample_rows=int(agent_raw.get("sample_rows", 20)),
+        query_max_rows=int(agent_raw.get("query_max_rows", 500_000)),
+        max_intent_retries=int(agent_raw.get("max_intent_retries", 2)),
         max_string_length=int(agent_raw.get("max_string_length", 5000)),
         read_only=bool(agent_raw.get("read_only", True)),
-        sample_rows_in_table_info=int(agent_raw.get("sample_rows_in_table_info", 3)),
         custom_section=raw.get("custom_section"),
         dialect=raw.get("dialect"),
         max_shards=int(agent_raw.get("max_shards", 20)),
         query_timeout=int(agent_raw.get("query_timeout", 30)),
         reuse_ttl_seconds=reuse_ttl_seconds,
+        batch_size=batch_size,
+        materialize_sample_rows=materialize_sample_rows,
+        budget=_parse_budget_config(
+            agent_raw.get("budget") if isinstance(agent_raw.get("budget"), dict) else None
+        ),
+        messages=_parse_messages_config(
+            agent_raw.get("messages") if isinstance(agent_raw.get("messages"), dict) else None
+        ),
+        prompts=_parse_prompts_config(
+            agent_raw.get("prompts") if isinstance(agent_raw.get("prompts"), dict) else None
+        ),
+        export_detect_keywords=_parse_export_detect_keywords(
+            agent_raw.get("export_detect_keywords")
+        ),
         llm=llm,
+        export=_parse_export_config(
+            agent_raw.get("export") if isinstance(agent_raw.get("export"), dict) else None
+        ),
         override_connections=override_connections or {},
     )
 

@@ -67,12 +67,19 @@ glossary:
     definition: "14 dígitos, sem formatação."
 
 agent:
-  top_k: 50
-  max_pages: 10
+  sample_rows: 50
+  query_max_rows: 500000
   max_string_length: 10000
   read_only: true
   max_shards: 20
   query_timeout: 30
+  # export:
+  #   enabled: true
+  #   dir: /tmp/txt2sql-exports
+  #   base_url: http://localhost:8501/exports
+  #   ttl_seconds: 86400
+  #   delimiter: ";"
+  #   max_rows: 500000
 
 llm:
   deployment: gpt-5.4-mini

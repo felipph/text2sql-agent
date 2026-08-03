@@ -77,8 +77,8 @@ glossary:
     definition: "Cadastro Nacional da Pessoa Jurídica — 14 dígitos."
 
 agent:
-  top_k: 50
-  max_pages: 10
+  sample_rows: 50
+  query_max_rows: 500000
   max_string_length: 10000
   read_only: true
   max_shards: 20  # teto de shards físicos distintos no fan-in

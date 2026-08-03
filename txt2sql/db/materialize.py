@@ -193,11 +193,15 @@ def materialize_tables(
                     table=table,
                     registry=registry,
                     bindings=bindings,
+                    batch_size=config.batch_size,
                 )
             except ValueError as err:
                 return _error_outcome(catalog, last_rows, str(err), kind="rejected")
             total_rows = result.row_count
-            last_rows = session.execute(f'SELECT * FROM "{logical_name}" LIMIT 5')
+            sample_n = max(1, int(config.materialize_sample_rows))
+            last_rows = session.execute(
+                f'SELECT * FROM "{logical_name}" LIMIT {sample_n}'
+            )
             source_queries_by_table[logical_name] = queries or [
                 f"fan-in:{len(bindings)} bindings"
             ]
@@ -245,13 +249,15 @@ def materialize_tables(
                 source_engine,
                 source_sql=decision.sql,
                 replace=True,
+                batch_size=config.batch_size,
             )
         except QueryTimeoutError as err:
             return _error_outcome(catalog, last_rows, str(err), kind="timeout")
         except Exception as err:  # noqa: BLE001
             return _error_outcome(catalog, last_rows, str(err), kind="error")
 
-        last_rows = session.execute(f'SELECT * FROM "{logical_name}" LIMIT 5')
+        sample_n = max(1, int(config.materialize_sample_rows))
+        last_rows = session.execute(f'SELECT * FROM "{logical_name}" LIMIT {sample_n}')
         count_rows = session.execute(f'SELECT COUNT(*) AS n FROM "{logical_name}"')
         total_rows = int(count_rows[0]["n"]) if count_rows else len(last_rows)
         source_queries_by_table[logical_name] = [decision.sql]

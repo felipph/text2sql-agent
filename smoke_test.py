@@ -246,7 +246,7 @@ cfg_yaml = load_config("examples/recebiveis.yaml")
 check("YAML: 4 bancos", len(cfg_yaml.databases) == 4)
 check("YAML: recebiveis é shardada", cfg_yaml.get_table("recebiveis").is_sharded)
 check("YAML: recebiveis usa duckdb", cfg_yaml.get_table("recebiveis").uses_duckdb)
-check("YAML: top_k=50", cfg_yaml.top_k == 50)
+check("YAML: sample_rows=50", cfg_yaml.sample_rows == 50)
 
 # prompt builder
 prompt = Txt2SqlPromptBuilder(cfg_yaml).build()

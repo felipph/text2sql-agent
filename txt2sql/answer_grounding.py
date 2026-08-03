@@ -81,12 +81,48 @@ def strip_provenance_from_answer(text: str) -> str:
     return "\n".join(lines).rstrip()
 
 
+def resolve_discriminator_label(
+    config: Any,
+    intent: Any | None = None,
+) -> str:
+    """Nome da coluna discriminadora tocada, ou ``discriminador``."""
+    try:
+        from txt2sql.shard_routing import _touched_table_ids
+
+        ids = _touched_table_ids(intent) if intent is not None else []
+    except Exception:  # noqa: BLE001
+        ids = []
+    if not ids and intent is not None:
+        for ent in getattr(intent, "entities", None) or []:
+            tid = getattr(ent, "table_id", None)
+            if tid:
+                ids.append(tid)
+    for tid in ids:
+        table = config.try_get_table(tid) if hasattr(config, "try_get_table") else None
+        if table is not None and table.sharding and table.sharding.discriminator_column:
+            return table.sharding.discriminator_column
+    for table in getattr(config, "tables", []) or []:
+        if table.sharding and table.sharding.discriminator_column:
+            return table.sharding.discriminator_column
+    return "discriminador"
+
+
+def format_ux_message(template: str, **kwargs: Any) -> str:
+    """Aplica placeholders; se faltar chave, devolve o template intacto."""
+    try:
+        return template.format(**kwargs)
+    except (KeyError, ValueError, IndexError):
+        return template
+
+
 def build_partial_user_notice(
     *,
     assumptions: list[str] | None = None,
     partial: bool = True,
     max_shards: int | None = None,
     shard_routing: ShardRouting | None = None,
+    discriminator: str = "discriminador",
+    suggestion_template: str | None = None,
 ) -> str | None:
     """Aviso em linguagem natural quando a resposta é incompleta.
 
@@ -133,11 +169,17 @@ def build_partial_user_notice(
             f"até {lim} grupos de dados particionados."
         )
 
-    suggestion = (
-        "Para obter o máximo possível com essa limitação, refine a pergunta: "
-        "delimite um conjunto menor de clientes/CNPJs, um período específico, "
-        "ou peça um ranking top-N com recorte mais estreito."
-    )
+    if suggestion_template:
+        suggestion = format_ux_message(
+            suggestion_template, discriminator=discriminator
+        )
+    else:
+        suggestion = format_ux_message(
+            "Para obter o máximo possível com essa limitação, refine a pergunta: "
+            "delimite um conjunto menor de valores de {discriminator}, um período "
+            "específico, ou peça um ranking top-N com recorte mais estreito.",
+            discriminator=discriminator,
+        )
     return f"{reason} {suggestion}"
 
 
@@ -169,6 +211,9 @@ def format_answer_from_sample(
     assumptions: list[str] | None = None,
     max_shards: int | None = None,
     shard_routing: ShardRouting | None = None,
+    discriminator: str = "discriminador",
+    suggestion_template: str | None = None,
+    header: str = "Resultado da consulta:",
 ) -> str:
     """Monta resposta determinística (tabela markdown) a partir do sample."""
     rows = list(last.sample or [])
@@ -176,7 +221,7 @@ def format_answer_from_sample(
         return "Consulta executada com sucesso, mas sem linhas no resultado."
 
     cols = list(rows[0].keys())
-    header = "| " + " | ".join(str(c) for c in cols) + " |"
+    header_row = "| " + " | ".join(str(c) for c in cols) + " |"
     sep = "| " + " | ".join("---" for _ in cols) + " |"
     body_lines: list[str] = []
     for row in rows:
@@ -185,9 +230,9 @@ def format_answer_from_sample(
         )
 
     lines = [
-        "Resultado da consulta:",
-        "",
         header,
+        "",
+        header_row,
         sep,
         *body_lines,
     ]
@@ -196,6 +241,8 @@ def format_answer_from_sample(
         partial=partial,
         max_shards=max_shards,
         shard_routing=shard_routing,
+        discriminator=discriminator,
+        suggestion_template=suggestion_template,
     )
     if notice:
         lines.extend(["", notice])
@@ -216,6 +263,8 @@ __all__ = [
     "build_partial_user_notice",
     "filter_messages_for_answer",
     "format_answer_from_sample",
+    "format_ux_message",
     "is_discriminator_retry_content",
+    "resolve_discriminator_label",
     "strip_provenance_from_answer",
 ]
