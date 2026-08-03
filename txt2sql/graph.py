@@ -33,6 +33,11 @@ from txt2sql.analytical_planning import (
     check_materialization_ready,
     run_sufficiency_gate,
 )
+from txt2sql.answer_grounding import (
+    answer_contradicts_ok_result,
+    filter_messages_for_answer,
+    format_answer_from_sample,
+)
 from txt2sql.artifacts import (
     Budget,
     DuckDBCatalog,
@@ -418,8 +423,17 @@ def build_graph(
             }
 
         # C: grounding do discriminador em filters — retry antes de clarificar
+        #     Exceto quando há lookup-then-route disponível (evita SystemMessage
+        #     ruidoso no histórico e vai direto a resolve_and_route).
         disc_errors = missing_discriminator_filter_errors(plan, config)
         if disc_errors:
+            from txt2sql.discriminator_lookup import find_lookup_source
+
+            if find_lookup_source(plan, config) is not None:
+                return {
+                    "intent_plan": plan,
+                    "intent_route": "resolve_and_route",
+                }
             retries = int(state.get("intent_retries", 0)) + 1
             if retries < MAX_INTENT_RETRIES:
                 feedback = SystemMessage(
@@ -434,7 +448,7 @@ def build_graph(
                     "intent_retries": retries,
                     "intent_route": "interpret_intent",
                 }
-            # retries esgotados → resolve_and_route (value_extractor / ClarifyNeeded)
+            # retries esgotados → resolve_and_route (value_extractor / ClarifyNeeded / lookup)
 
         return {
             "intent_plan": plan,
@@ -937,8 +951,17 @@ def build_graph(
         sql_history = list(state.get("executed_sql_history") or [])
         partial = bool(state.get("partial", False))
         assumptions = list(plan.assumptions or [])
+        clean_messages = filter_messages_for_answer(list(state.get("messages") or []))
         context = (
             "Responda ao usuário em PT-BR com base no IntentPlan e last_result.\n"
+            "REGRAS OBRIGATÓRIAS:\n"
+            "- Se last_result.status for 'ok' e houver sample/linhas, você DEVE "
+            "apresentar esses dados (preferencialmente em tabela markdown). "
+            "NUNCA diga que a consulta falhou, que faltou discriminador/CNPJ, "
+            "ou que não foi possível executar — isso já foi resolvido pelo sistema.\n"
+            "- Se partial=true, diga claramente que a cobertura é parcial e cite "
+            "as assumptions relevantes (ex.: max_shards).\n"
+            "- Ignore mensagens antigas do sistema sobre falta de discriminador.\n"
             "Inclua no final um bloco separado por '---' com proveniência:\n"
             "- SQL executado\n"
             "- Assunções do intent\n"
@@ -949,10 +972,16 @@ def build_graph(
             f"executed_sql_history:\n{json.dumps(sql_history, ensure_ascii=False)}\n"
             f"partial: {partial}\n"
         )
-        response = answer_llm.invoke([SystemMessage(content=context), *state["messages"]])
+        response = answer_llm.invoke([SystemMessage(content=context), *clean_messages])
         text = (
             response if isinstance(response, str) else getattr(response, "content", str(response))
         )
+        if answer_contradicts_ok_result(str(text), last):
+            text = format_answer_from_sample(
+                last,  # type: ignore[arg-type]
+                partial=partial,
+                assumptions=assumptions,
+            )
         text = _append_provenance_footer(
             text,
             sql_history=sql_history,

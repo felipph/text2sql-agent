@@ -201,6 +201,83 @@ def test_ensure_discriminator_filters_injects_in_clause() -> None:
     assert set(enriched.filters[0].value) == {"65410433218196", "74778161849593"}
 
 
+def test_ensure_discriminator_filters_syncs_to_capped_bindings() -> None:
+    """Após max_shards, filters devem refletir só os discriminadores retidos."""
+    plan = IntentPlan(
+        filters=[
+            FilterClause(
+                table_id="recebiveis",
+                column_id="cnpj",
+                op="in",
+                value=["1", "2", "3", "4", "5"],
+            )
+        ],
+        metrics=[MetricClause(table_id="recebiveis", column_id="valor", agg="sum")],
+    )
+    routing = ShardRouting(
+        mode="multi",
+        bindings=[
+            ShardBinding(
+                table_id="recebiveis",
+                discriminator_value="1",
+                database_id="shard1",
+                physical_table="t1",
+            ),
+            ShardBinding(
+                table_id="recebiveis",
+                discriminator_value="2",
+                database_id="shard2",
+                physical_table="t2",
+            ),
+        ],
+        logical_table="recebiveis",
+        capped=True,
+        cap_assumption="Cobertura parcial: 2 de 5 shards físicos (max_shards=2)",
+    )
+    synced = ensure_discriminator_filters(plan, routing, _cfg_sharded())
+    assert len(synced.filters) == 1
+    assert synced.filters[0].op == "in"
+    assert set(synced.filters[0].value) == {"1", "2"}
+
+
+def test_ensure_discriminator_filters_preserves_non_disc_filters() -> None:
+    plan = IntentPlan(
+        filters=[
+            FilterClause(
+                table_id="recebiveis",
+                column_id="status",
+                op="in",
+                value=["pago", "vencido"],
+            ),
+            FilterClause(
+                table_id="recebiveis",
+                column_id="cnpj",
+                op="in",
+                value=["1", "2", "3"],
+            ),
+        ],
+    )
+    routing = ShardRouting(
+        mode="multi",
+        bindings=[
+            ShardBinding(
+                table_id="recebiveis",
+                discriminator_value="1",
+                database_id="shard1",
+                physical_table="t1",
+            ),
+        ],
+        logical_table="recebiveis",
+    )
+    synced = ensure_discriminator_filters(plan, routing, _cfg_sharded())
+    assert len(synced.filters) == 2
+    status_f = next(f for f in synced.filters if f.column_id == "status")
+    cnpj_f = next(f for f in synced.filters if f.column_id == "cnpj")
+    assert status_f.value == ["pago", "vencido"]
+    assert cnpj_f.op == "eq"
+    assert cnpj_f.value == "1"
+
+
 def test_resolve_routing_rejects_unknown_database_id() -> None:
     class FakeReg:
         def has_database(self, db_id: str) -> bool:

@@ -189,7 +189,12 @@ def ensure_discriminator_filters(
     routing: ShardRouting,
     config: AgentConfig,
 ) -> IntentPlan:
-    """Garante FilterClause(eq/in) para discriminadores presentes nos bindings."""
+    """Alinha FilterClause(eq/in) do discriminador aos bindings resolvidos.
+
+    Substitui filtros do discriminador (não só injeta quando ausentes) para que,
+    após ``max_shards``, o IntentPlan não retenha valores descartados pelo cap.
+    Filtros de outras colunas são preservados.
+    """
     if not routing.bindings:
         return intent_plan
 
@@ -197,17 +202,29 @@ def ensure_discriminator_filters(
     for b in routing.bindings:
         by_table.setdefault(b.table_id, []).append(b.discriminator_value)
 
-    new_filters = list(intent_plan.filters)
-    changed = False
-    for table_id, values in by_table.items():
+    # Remove filtros do discriminador das tabelas presentes no routing.
+    kept_filters: list[FilterClause] = []
+    disc_cols: dict[str, str] = {}
+    for table_id in by_table:
         table = config.try_get_table(table_id)
         if table is None or table.sharding is None:
             continue
-        disc_col = table.sharding.discriminator_column
-        existing = _discriminator_values_from_filters(
-            IntentPlan(filters=new_filters), table_id, disc_col
-        )
-        if existing:
+        disc_cols[table_id] = table.sharding.discriminator_column
+
+    for f in intent_plan.filters:
+        disc = disc_cols.get(f.table_id)
+        if disc is None:
+            kept_filters.append(f)
+            continue
+        col = f.column_id.split(".")[-1] if f.column_id else ""
+        if col == disc or f.column_id == disc:
+            continue
+        kept_filters.append(f)
+
+    new_filters = list(kept_filters)
+    for table_id, values in by_table.items():
+        disc_col = disc_cols.get(table_id)
+        if disc_col is None:
             continue
         unique = list(dict.fromkeys(values))
         if len(unique) == 1:
@@ -222,10 +239,7 @@ def ensure_discriminator_filters(
                     table_id=table_id, column_id=disc_col, op="in", value=unique
                 )
             )
-        changed = True
 
-    if not changed:
-        return intent_plan
     return intent_plan.model_copy(update={"filters": new_filters})
 
 

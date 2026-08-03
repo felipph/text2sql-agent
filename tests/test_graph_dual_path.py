@@ -229,6 +229,32 @@ def test_simple_path_clientes_final_answer(monkeypatch: Any) -> None:
     assert "Alpha" in result["final_answer"]
 
 
+def test_answer_fallback_when_llm_claims_failure_despite_ok_result(monkeypatch: Any) -> None:
+    """P0: answer não pode narrar falha se last_result.status=ok."""
+    _env()
+    cfg = _cfg_clientes_db()
+    ready = IntentPlan(
+        status="ready",
+        question_rewrite="nome do cliente 111",
+        metrics=[MetricClause(table_id="clientes", column_id="razao_social", agg="none")],
+    )
+    script = [
+        ready,
+        SQLPlan(sql="SELECT razao_social FROM clientes WHERE cnpj = '111'", dialect="postgres"),
+        VerifyDecision(action="answer", reason="ok"),
+        "Não consegui fechar a consulta porque falta o discriminador de shard.",
+    ]
+    monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: ScriptedLLM(script))
+    agent = build_agent(cfg, checkpointer=None)
+    result = agent.invoke({"messages": [HumanMessage(content="nome do cliente 111?")]})
+
+    answer = result.get("final_answer") or ""
+    assert "Não consegui" not in answer
+    assert "Alpha" in answer
+    assert result.get("last_result")
+    assert _d(result["last_result"]).get("status") == "ok"
+
+
 def test_analytical_path_force_analytical_reaches_answer(monkeypatch: Any) -> None:
     _env()
     cfg = _cfg_recebiveis_analytical()
@@ -439,6 +465,64 @@ def _cfg_lookup_clientes_recebiveis(tmp: Path) -> AgentConfig:
     )
 
 
+def test_discriminator_lookup_skips_intent_retry_system_message(monkeypatch: Any) -> None:
+    """Com RelationshipConfig, não injeta SystemMessage de retry de discriminador."""
+    _env()
+    tmp = Path(tempfile.mkdtemp())
+    cfg = _cfg_lookup_clientes_recebiveis(tmp)
+    ready = IntentPlan(
+        status="ready",
+        question_rewrite="análise de todos os clientes",
+        metrics=[MetricClause(table_id="recebiveis", column_id="valor", agg="sum")],
+        entities=[
+            EntityRef(mention="clientes", table_id="clientes", role="table"),
+            EntityRef(mention="recebiveis", table_id="recebiveis", role="table"),
+        ],
+        joins=[
+            JoinClause(
+                from_table_id="clientes",
+                to_table_id="recebiveis",
+                on=[JoinOn(from_column="cnpj", to_column="cnpj")],
+            )
+        ],
+    )
+    mat_plan = MaterializationPlan(
+        steps=[
+            MaterializationStep(
+                source_query="SELECT cnpj, valor FROM recebiveis_111",
+                target_table="recebiveis",
+                mode="replace",
+            )
+        ],
+        rationale="extract",
+    )
+    # Um único IntentPlan basta — sem retry intermediário
+    script = [
+        ready,
+        mat_plan,
+        SQLPlan(sql="SELECT SUM(valor) AS total FROM recebiveis", dialect="duckdb"),
+        VerifyDecision(action="answer", reason="ok"),
+        "Total agregado.",
+    ]
+    monkeypatch.setattr("txt2sql.graph.build_llm", lambda config: ScriptedLLM(script))
+    monkeypatch.setattr(
+        "txt2sql.analytical_planning.build_deterministic_mat_plan", lambda *_a, **_k: None
+    )
+    agent = build_agent(cfg, checkpointer=MemorySaver())
+    result = agent.invoke(
+        {"messages": [HumanMessage(content="análise de todos os clientes")]},
+        config={"configurable": {"thread_id": "lookup-no-retry"}},
+    )
+    disc_feedback = [
+        m
+        for m in result["messages"]
+        if "falta o discriminador" in str(getattr(m, "content", "")).lower()
+    ]
+    assert not disc_feedback
+    assert result.get("execution_path") == "analytical"
+    assert result.get("intent_retries", 0) == 0
+
+
 def test_discriminator_lookup_injects_filters_without_hitl(monkeypatch: Any) -> None:
     """Sem CNPJ em filters, com relationship → lookup em clientes e segue analytical."""
     _env()
@@ -472,7 +556,6 @@ def test_discriminator_lookup_injects_filters_without_hitl(monkeypatch: Any) -> 
     )
     script = [
         ready,
-        ready,  # retry por missing filter
         mat_plan,
         SQLPlan(sql="SELECT SUM(valor) AS total FROM recebiveis", dialect="duckdb"),
         VerifyDecision(action="answer", reason="ok"),
